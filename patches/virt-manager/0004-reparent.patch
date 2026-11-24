@@ -1,0 +1,113 @@
+--- a/virtManager/details/console.py
++++ b/virtManager/details/console.py
+@@ -7,12 +7,14 @@
+ 
+ from gi.repository import Gtk
+ from gi.repository import Gdk
++from gi.repository import GLib
+ 
+ from virtinst import log
+ 
+ from .serialcon import vmmSerialConsole
+ from .sshtunnels import ConnectionInfo
+ from .viewers import SpiceViewer, VNCViewer, SPICE_GTK_IMPORT_ERROR
++from .gtk_embed import GtkEmbedSpiceViewer
+ from ..baseclass import vmmGObject, vmmGObjectUI
+ from ..lib.keyring import vmmKeyring
+ 
+@@ -181,6 +183,9 @@
+         )
+ 
+     def cleanup(self):
++        # Park the foreign window before the widget tree dies; QEMU
++        # exits on BadWindow if its X parent is destroyed underneath it.
++        self._close_viewer()
+         self._keycombo_menu.destroy()
+         self._keycombo_menu = None
+         self._toolbar.destroy()
+@@ -197,6 +202,24 @@
+     return msg
+ 
+ 
++def _is_wayland():
++    display = Gdk.Display.get_default()
++    return bool(display and Gdk.Display.get_name(display).startswith("wayland"))
++
++
++def _has_qemu_gtk_display(vm):
++    """True when qemu:commandline passes -display gtk."""
++    try:
++        args = [arg.value for arg in vm.get_xmlobj().xmlns_qemu.args]
++    except Exception:
++        return False
++    for idx, arg in enumerate(args[:-1]):
++        if arg == "-display" and args[idx + 1].startswith("gtk"):
++            return True
++    return False
++
++
++
+ class _ConsoleMenu(vmmGObject):
+     """
+     Helper class for building the text/graphical console menu list
+@@ -236,6 +259,8 @@
+ 
+         from ..device.gfxdetails import vmmGraphicsDetails
+ 
++        has_gtk = _has_qemu_gtk_display(vm) and not _is_wayland()
++
+         ret = []
+         found_default = False
+         for gdev in vm.xmlobj.devices.graphics:
+@@ -250,6 +275,10 @@
+             if idx > 0:
+                 label += " %s" % (idx + 1)
+ 
++            if has_gtk and gdev.type == "spice":
++                ginfo._use_gtk_display = True
++                label = _("Graphical Console GTK")
++
+             tooltip = _cant_embed_graphics(ginfo)
+             if not tooltip:
+                 if not found_default:
+@@ -662,6 +691,9 @@
+                     raise RuntimeError("Error opening SPICE console: %s" % SPICE_GTK_IMPORT_ERROR)
+                 viewer_class = SpiceViewer
+ 
++            if getattr(ginfo, "_use_gtk_display", False):
++                viewer_class = GtkEmbedSpiceViewer
++
+             self._viewer = viewer_class(self.vm, ginfo)
+             self._connect_viewer_signals()
+ 
+@@ -691,6 +723,14 @@
+     ##########################
+ 
+     def _viewer_add_display_cb(self, _src, display):
++        parent = display.get_parent()
++        if parent:
++            parent.remove(display)
++        viewport = self.widget("console-gfx-viewport")
++        old = viewport.get_child()
++        while old:
++            viewport.remove(old)
++            old = viewport.get_child()
+         self.widget("console-gfx-viewport").add(display)
+ 
+         # Sync initial settings
+@@ -787,6 +827,15 @@
+         # Make sure modifiers are set correctly
+         self._viewer_sync_modifiers()
+ 
++        # USB rows may only appear after the session finishes connecting.
++        self.emit("page-changed")
++
++        def _late_refresh():
++            self.emit("page-changed")
++            return False
++
++        GLib.timeout_add(500, _late_refresh)
++
+     def _connect_viewer_signals(self):
+         self._viewer.connect("add-display-widget", self._viewer_add_display_cb)
+         self._viewer.connect("pointer-grab", self._pointer_grabbed_cb)

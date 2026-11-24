@@ -1,0 +1,17 @@
+# Third-party sources pulled or overlaid by this package
+
+| Component | Upstream | Licence | Form |
+|---|---|---|---|
+| virt-manager | https://github.com/virt-manager/virt-manager | GPL-2.0-or-later | source tarball, patched |
+| QEMU | https://www.qemu.org | GPL-2.0-or-later | source tarball |
+| VMVGA | https://github.com/qemus/qemu-vmvga | GPL-2.0-or-later | source overlay onto QEMU |
+| dxvk-native | https://github.com/doitsujin/dxvk | Zlib | prebuilt release or source build |
+| virglrenderer | https://gitlab.freedesktop.org/virgl/virglrenderer | MIT | source build |
+| OVMF / edk2 | https://github.com/tianocore/edk2 | BSD-2-Clause-Patent | prebuilt images; `patches/ovmf/` + `tools/build-ovmf.sh` reproduce them |
+| qemu-embed-shim.so | this project | GPL-2.0-or-later | source; built at install |
+
+No third-party source is modified in this repository. VMVGA is copied
+verbatim into a QEMU build tree, and QEMU/virt-manager receive only the
+patch series under `patches/`.
+
+`share/vendor/NOTICE-shim.md` records the shim build and current hash.

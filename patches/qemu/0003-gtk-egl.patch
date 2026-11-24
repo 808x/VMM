@@ -1,0 +1,460 @@
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -50,6 +50,8 @@ typedef struct VirtualGfxConsole {
+     EGLSurface esurface;
+     int glupdates;
+     int x, y, w, h;
++    /* Focus transition, so the forced re-blit fires once per arrival. */
++    bool gl_was_focused;
+     egl_fb guest_fb;
+     egl_fb win_fb;
+     egl_fb cursor_fb;
+@@ -59,6 +61,13 @@ typedef struct VirtualGfxConsole {
+     bool scanout_mode;
+     bool has_dmabuf;
+ #endif
++    /* Touchpad pinch/swipe state for multitouch synthesis. */
++    struct {
++        double cx, cy;      /* gesture center */
++        double base_r;      /* finger separation at scale == 1.0 */
++        int fingers;        /* slots in use */
++        bool active;
++    } tpad;
+ } VirtualGfxConsole;
+ 
+ #if defined(CONFIG_VTE)
+--- a/ui/console-priv.h
++++ b/ui/console-priv.h
+@@ -19,6 +19,8 @@ struct QemuConsole {
+     DisplayGLCtx *gl;
+     int gl_block;
+     QEMUTimer *gl_unblock_timer;
++    /* Force-unblock a leaked gl-block; otherwise the console stays dead. */
++    QEMUTimer *gl_force_unblock_timer;
+     int window_id;
+     QemuUIInfo ui_info;
+     QEMUTimer *ui_timer;
+--- a/ui/console.c
++++ b/ui/console.c
+@@ -181,6 +181,22 @@ static void console_hw_gl_unblock_timer(void *opaque)
+     warn_report("console: no gl-unblock within one second");
+ }
+ 
++/* A lost dmabuf fence leaves gl_block set forever; force it clear. */
++static void console_hw_gl_force_unblock_timer(void *opaque)
++{
++    QemuConsole *con = opaque;
++
++    if (con->gl_block <= 0) {
++        return;
++    }
++    error_report("console: gl-block stuck for 3s (%d pending), forcing unblock",
++                 con->gl_block);
++    con->gl_block = 0;
++    if (con->hw_ops->gl_block) {
++        con->hw_ops->gl_block(con->hw, false);
++    }
++}
++
+ void qemu_console_hw_gl_block(QemuConsole *con, bool block)
+ {
+     uint64_t timeout;
+@@ -204,8 +220,17 @@ void qemu_console_hw_gl_block(QemuConsole *con, bool block)
+         timeout = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+         timeout += 1000; /* one sec */
+         timer_mod(con->gl_unblock_timer, timeout);
++        /* Arm once per burst; nested blocks keep the outermost deadline. */
++        if (con->gl_block == 1) {
++            timeout = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
++            timeout += 3000;
++            timer_mod(con->gl_force_unblock_timer, timeout);
++        }
+     } else {
+         timer_del(con->gl_unblock_timer);
++        if (con->gl_block == 0) {
++            timer_del(con->gl_force_unblock_timer);
++        }
+     }
+ }
+ 
+@@ -437,6 +462,7 @@ qemu_console_finalize(Object *obj)
+     assert(qemu_co_queue_empty(&c->dump_queue));
+     g_clear_pointer(&c->surface, qemu_free_displaysurface);
+     g_clear_pointer(&c->gl_unblock_timer, timer_free);
++    g_clear_pointer(&c->gl_force_unblock_timer, timer_free);
+     g_clear_pointer(&c->ui_timer, timer_free);
+     QTAILQ_REMOVE(&consoles, c, next);
+ }
+@@ -459,6 +485,9 @@ qemu_console_init(Object *obj)
+                                dpy_set_ui_info_timer, c);
+     c->gl_unblock_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                        console_hw_gl_unblock_timer, c);
++    c->gl_force_unblock_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
++                                             console_hw_gl_force_unblock_timer,
++                                             c);
+     qemu_console_register(c);
+ }
+ 
+--- a/ui/gtk-egl.c
++++ b/ui/gtk-egl.c
+@@ -24,6 +24,33 @@
+ 
+ #include "system/system.h"
+ 
++/* GDK's viewable flag is stale until UnmapNotify is processed; ask the
++ * server so a swap cannot hit an already-unmapped window (DRI3/Present
++ * would block forever). */
++static gboolean gd_egl_window_server_viewable(GdkWindow *window)
++{
++    Display *xdisp;
++    XWindowAttributes xa;
++
++    xdisp = (Display *)gdk_x11_display_get_xdisplay(gdk_window_get_display(window));
++    if (!xdisp) {
++        return FALSE;
++    }
++    if (!XGetWindowAttributes(xdisp, gdk_x11_window_get_xid(window), &xa)) {
++        return FALSE;
++    }
++    return xa.map_state == IsViewable;
++}
++
++/* Hidden means gone, GDK-unviewable, or server-unviewable. */
++static gboolean gd_egl_window_hidden(GdkWindow *window)
++{
++    if (!window || !gdk_window_is_viewable(window)) {
++        return TRUE;
++    }
++    return !gd_egl_window_server_viewable(window);
++}
++
+ static void gtk_egl_set_scanout_mode(VirtualConsole *vc, bool scanout)
+ {
+     if (vc->gfx.scanout_mode == scanout) {
+@@ -63,6 +90,60 @@ void gd_egl_init(VirtualConsole *vc)
+     assert(vc->gfx.esurface);
+ }
+ 
++/* Focus-in on the QEMU toplevel or any embedder ancestor, provided the
++ * console is mapped. Used to trigger one forced re-blit. */
++static bool gd_egl_forced_draw;
++
++static bool gd_focused_visible(VirtualConsole *vc)
++{
++    GtkWidget *w = vc->window ? vc->window : vc->gfx.drawing_area;
++    GtkWindow *toplevel;
++    GdkWindow *gwin;
++    Display *dpy;
++    Window xwin, focus, parent, next_parent, root;
++    int revert_to = RevertToNone;
++    unsigned int nchildren;
++    Window *children = NULL;
++
++    if (!gtk_widget_get_mapped(w)) {
++        return false;
++    }
++    toplevel = GTK_WINDOW(gtk_widget_get_toplevel(w));
++    gwin = gtk_widget_get_window(GTK_WIDGET(toplevel));
++    if (!gwin) {
++        return false;
++    }
++    if (gtk_window_is_active(toplevel)) {
++        /* focus held inside our hierarchy (e.g. a GDK keyboard grab
++         * window); GTK tracks this as toplevel-active */
++        return true;
++    }
++    dpy = gdk_x11_display_get_xdisplay(gdk_window_get_display(gwin));
++    if (!dpy) {
++        return false;
++    }
++    xwin = gdk_x11_window_get_xid(gwin);
++    XGetInputFocus(dpy, &focus, &revert_to);
++    for (parent = xwin; parent != None; parent = next_parent) {
++        if (parent == focus) {
++            /* our toplevel or an embedder ancestor holds X focus */
++            return true;
++        }
++        if (!XQueryTree(dpy, parent, &root, &next_parent,
++                        &children, &nchildren)) {
++            break;
++        }
++        if (children) {
++            XFree(children);
++            children = NULL;
++        }
++        if (parent == root) {
++            break;
++        }
++    }
++    return false;
++}
++
+ void gd_egl_draw(VirtualConsole *vc)
+ {
+     GdkWindow *window;
+@@ -71,12 +152,16 @@ void gd_egl_draw(VirtualConsole *vc)
+     int fence_fd;
+ #endif
+     int ww, wh, pw, ph, gs;
++    gboolean hidden;
+ 
+     if (!vc->gfx.gls || !vc->gfx.ds) {
+         return;
+     }
+ 
+     window = gtk_widget_get_window(vc->gfx.drawing_area);
++    /* Skip only the swap: the draw/fence bookkeeping must still run or
++     * the console's gl-block leaks. */
++    hidden = gd_egl_window_hidden(window);
+     gs = gdk_window_get_scale_factor(window);
+     ww = gdk_window_get_width(window);
+     wh = gdk_window_get_height(window);
+@@ -87,7 +172,11 @@ void gd_egl_draw(VirtualConsole *vc)
+ #ifdef CONFIG_GBM
+         if (dmabuf) {
+             if (!qemu_dmabuf_get_draw_submitted(dmabuf)) {
+-                return;
++                if (!gd_egl_forced_draw) {
++                    return;
++                }
++                /* Forced re-blit of the last completed frame; keep
++                 * draw_submitted unchanged. */
+             } else {
+                 qemu_dmabuf_set_draw_submitted(dmabuf, false);
+             }
+@@ -119,7 +208,9 @@ void gd_egl_draw(VirtualConsole *vc)
+         surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, pw, ph);
+         surface_gl_render_texture(vc->gfx.gls, vc->gfx.ds);
+ 
+-        eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
++        if (!hidden) {
++            eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
++        }
+ 
+         gd_update_scale(vc, ww, wh,
+                         surface_width(vc->gfx.ds),
+@@ -182,7 +273,12 @@ void gd_egl_refresh(DisplayChangeListener *dcl)
+     if (vc->gfx.glupdates) {
+         vc->gfx.glupdates = 0;
+         gd_egl_draw(vc);
++    } else if (gd_focused_visible(vc) && !vc->gfx.gl_was_focused) {
++        gd_egl_forced_draw = true;
++        gd_egl_draw(vc);
++        gd_egl_forced_draw = false;
+     }
++    vc->gfx.gl_was_focused = gd_focused_visible(vc);
+ }
+ 
+ void gd_egl_switch(DisplayChangeListener *dcl,
+@@ -340,6 +436,7 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
+     int pw_widget, ph_widget, pw_surface, ph_surface;
+     int ww_widget, wh_widget, ww_surface, wh_surface;
+     int fbw, fbh;
++    gboolean hidden;
+ 
+     if (!vc->gfx.scanout_mode) {
+         return;
+@@ -352,6 +449,8 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
+                    vc->gfx.esurface, vc->gfx.ectx);
+ 
+     window = gtk_widget_get_window(vc->gfx.drawing_area);
++    /* Same skip-swap-only policy as gd_egl_draw. */
++    hidden = gd_egl_window_hidden(window);
+     gs = gdk_window_get_scale_factor(window);
+     ww_widget = gdk_window_get_width(window);
+     wh_widget = gdk_window_get_height(window);
+@@ -395,7 +494,9 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
+     }
+ #endif
+ 
+-    eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
++    if (!hidden) {
++        eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
++    }
+ }
+ 
+ void gd_egl_flush(DisplayChangeListener *dcl,
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -800,6 +800,22 @@ void gd_update_monitor_refresh_rate(VirtualConsole *vc, GtkWidget *widget)
+     GdkWindow *win = gtk_widget_get_window(widget);
+     int refresh_rate;
+ 
++    /* Optional QEMU_GTK_REFRESH_RATE [Hz]; GDK autodetect can report 0
++     * and fall back to a ~33fps cap. Also feeds ui_info/EDID. */
++    {
++        const char *env_rate = getenv("QEMU_GTK_REFRESH_RATE");
++        if (env_rate && *env_rate) {
++            int hz = atoi(env_rate);
++            if (hz > 0) {
++                refresh_rate = hz * 1000; /* Hz -> mHz */
++                gd_set_ui_refresh_rate(vc, refresh_rate);
++                vc->gfx.dcl.update_interval = MIN(1000 * 1000 / refresh_rate,
++                                                  GUI_REFRESH_INTERVAL_DEFAULT);
++                return;
++            }
++        }
++    }
++
+     if (win) {
+         GdkDisplay *dpy = gtk_widget_get_display(widget);
+         GdkMonitor *monitor = gdk_display_get_monitor_at_window(dpy, win);
+@@ -1217,6 +1233,141 @@ static gboolean gd_touch_event(GtkWidget *widget, GdkEventTouch *touch,
+     return TRUE;
+ }
+ 
++/* Translate GDK touchpad pinch/swipe into virtio-multitouch slots. */
++static gboolean gd_touchpad_pinch_event(GtkWidget *widget,
++                                        GdkEvent *event, void *opaque)
++{
++    VirtualConsole *vc = opaque;
++    GdkEventTouchpadPinch *pinch = (GdkEventTouchpadPinch *)event;
++    Error *err = NULL;
++    int type;
++    double r, angle;
++    int i;
++
++    switch (pinch->phase) {
++    case GDK_TOUCHPAD_GESTURE_PHASE_BEGIN:
++        type = INPUT_MULTI_TOUCH_TYPE_BEGIN;
++        vc->gfx.tpad.active = true;
++        vc->gfx.tpad.cx = pinch->x;
++        vc->gfx.tpad.cy = pinch->y;
++        vc->gfx.tpad.base_r = 60.0;
++        vc->gfx.tpad.fingers = 2;
++        break;
++    case GDK_TOUCHPAD_GESTURE_PHASE_UPDATE:
++        type = INPUT_MULTI_TOUCH_TYPE_UPDATE;
++        if (!vc->gfx.tpad.active) {
++            return FALSE;
++        }
++        /* Follow the drifting center as a two-finger pan. */
++        vc->gfx.tpad.cx += pinch->dx;
++        vc->gfx.tpad.cy += pinch->dy;
++        break;
++    case GDK_TOUCHPAD_GESTURE_PHASE_END:
++    case GDK_TOUCHPAD_GESTURE_PHASE_CANCEL:
++        type = INPUT_MULTI_TOUCH_TYPE_END;
++        if (!vc->gfx.tpad.active) {
++            return FALSE;
++        }
++        vc->gfx.tpad.active = false;
++        break;
++    default:
++        return FALSE;
++    }
++
++    angle = 0.0;
++    r = vc->gfx.tpad.base_r * (type == INPUT_MULTI_TOUCH_TYPE_BEGIN
++                                   ? 1.0 : pinch->scale);
++    for (i = 0; i < vc->gfx.tpad.fingers; i++) {
++        double side = (i % 2 == 0) ? -1.0 : 1.0;
++        double px = vc->gfx.tpad.cx +
++                    side * r * cos(angle + M_PI_2 * (i / 2));
++        double py = vc->gfx.tpad.cy +
++                    side * r * sin(angle + M_PI_2 * (i / 2));
++        qemu_input_touch_event(vc->gfx.dcl.con, touch_slots, i,
++                               surface_width(vc->gfx.ds),
++                               surface_height(vc->gfx.ds),
++                               px, py, type, &err);
++        if (err) {
++            warn_report_err(err);
++            err = NULL;
++        }
++    }
++    return TRUE;
++}
++
++static gboolean gd_touchpad_swipe_event(GtkWidget *widget,
++                                        GdkEvent *event, void *opaque)
++{
++    VirtualConsole *vc = opaque;
++    GdkEventTouchpadSwipe *swipe = (GdkEventTouchpadSwipe *)event;
++    Error *err = NULL;
++    int type, n;
++    double spacing = 50.0;
++    int i;
++
++    switch (swipe->phase) {
++    case GDK_TOUCHPAD_GESTURE_PHASE_BEGIN:
++        type = INPUT_MULTI_TOUCH_TYPE_BEGIN;
++        vc->gfx.tpad.active = true;
++        vc->gfx.tpad.cx = swipe->x;
++        vc->gfx.tpad.cy = swipe->y;
++        n = swipe->n_fingers > 0 ? swipe->n_fingers : 3;
++        if (n > INPUT_EVENT_SLOTS_MAX) {
++            n = INPUT_EVENT_SLOTS_MAX;
++        }
++        vc->gfx.tpad.fingers = n;
++        break;
++    case GDK_TOUCHPAD_GESTURE_PHASE_UPDATE:
++        type = INPUT_MULTI_TOUCH_TYPE_UPDATE;
++        if (!vc->gfx.tpad.active) {
++            return FALSE;
++        }
++        vc->gfx.tpad.cx += swipe->dx;
++        vc->gfx.tpad.cy += swipe->dy;
++        break;
++    case GDK_TOUCHPAD_GESTURE_PHASE_END:
++    case GDK_TOUCHPAD_GESTURE_PHASE_CANCEL:
++        type = INPUT_MULTI_TOUCH_TYPE_END;
++        if (!vc->gfx.tpad.active) {
++            return FALSE;
++        }
++        vc->gfx.tpad.active = false;
++        break;
++    default:
++        return FALSE;
++    }
++
++    n = vc->gfx.tpad.fingers;
++    for (i = 0; i < n; i++) {
++        double px = vc->gfx.tpad.cx +
++                    ((i - (n - 1) / 2.0) * spacing);
++        double py = vc->gfx.tpad.cy;
++        qemu_input_touch_event(vc->gfx.dcl.con, touch_slots, i,
++                               surface_width(vc->gfx.ds),
++                               surface_height(vc->gfx.ds),
++                               px, py, type, &err);
++        if (err) {
++            warn_report_err(err);
++            err = NULL;
++        }
++    }
++    return TRUE;
++}
++
++/* GTK3 has no touchpad-gesture signal; use the generic event hook. */
++static gboolean gd_touchpad_event(GtkWidget *widget, GdkEvent *event,
++                                  void *opaque)
++{
++    switch (event->type) {
++    case GDK_TOUCHPAD_PINCH:
++        return gd_touchpad_pinch_event(widget, event, opaque);
++    case GDK_TOUCHPAD_SWIPE:
++        return gd_touchpad_swipe_event(widget, event, opaque);
++    default:
++        return FALSE;
++    }
++}
++
+ static const guint16 *gd_get_keymap(size_t *maplen, bool *xorgevdev)
+ {
+     GdkDisplay *dpy = gdk_display_get_default();
+@@ -2223,6 +2374,8 @@ static void gd_connect_vc_gfx_signals(VirtualConsole *vc)
+                          G_CALLBACK(gd_key_event), vc);
+         g_signal_connect(vc->gfx.drawing_area, "touch-event",
+                          G_CALLBACK(gd_touch_event), vc);
++        g_signal_connect(vc->gfx.drawing_area, "event",
++                         G_CALLBACK(gd_touchpad_event), vc);
+ 
+         g_signal_connect(vc->gfx.drawing_area, "enter-notify-event",
+                          G_CALLBACK(gd_enter_event), vc);
+@@ -2395,6 +2548,7 @@ add_gfx_console(GtkDisplayState *s, QemuConsole *con)
+                           GDK_BUTTON_RELEASE_MASK |
+                           GDK_BUTTON_MOTION_MASK |
+                           GDK_TOUCH_MASK |
++                          GDK_TOUCHPAD_GESTURE_MASK |
+                           GDK_ENTER_NOTIFY_MASK |
+                           GDK_LEAVE_NOTIFY_MASK |
+                           GDK_SCROLL_MASK |

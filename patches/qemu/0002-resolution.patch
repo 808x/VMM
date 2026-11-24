@@ -1,0 +1,296 @@
+--- a/hw/display/vmware_vga.c
++++ b/hw/display/vmware_vga.c
+@@ -442,6 +442,11 @@
+     uint32_t disp_y;
+     uint32_t disp_width;
+     uint32_t disp_height;
++    /* Host-requested guest mode; not migrated. */
++    uint32_t reso_wanted_width;
++    uint32_t reso_wanted_height;
++    int64_t reso_last_send_ms;
++    uint32_t reso_sends;
+     uint32_t devcap_val;
+     uint32_t gmrdesc;
+     uint32_t gmrid;
+@@ -10303,6 +10308,30 @@
+         cursor_update_from_fifo(s);
+     }
+ 
++    /* Re-send the requested mode until the guest reports it, ~3s apart,
++     * at most 60 times so a Tools-less guest cannot spin. */
++    if (s->reso_wanted_width != 0 && s->reso_wanted_height != 0 &&
++        s->enable &&
++        (vmsvga_read_width(s) != s->reso_wanted_width ||
++         vmsvga_read_height(s) != s->reso_wanted_height) &&
++        s->reso_sends < 60) {
++        int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
++        if (s->reso_last_send_ms == 0 ||
++            now_ms - s->reso_last_send_ms > 3000) {
++            char *msg = g_strdup_printf("Resolution_Set %u %u",
++                                        s->reso_wanted_width,
++                                        s->reso_wanted_height);
++            vmport_guestrpc_send_to_tclo(msg);
++            g_free(msg);
++            msg = g_strdup_printf("DisplayTopology_Set 1 , 0 0 %u %u",
++                                  s->reso_wanted_width, s->reso_wanted_height);
++            vmport_guestrpc_send_to_guest(msg);
++            g_free(msg);
++            s->reso_last_send_ms = now_ms;
++            s->reso_sends++;
++        }
++    }
++
+     /* Current VirtualBox completes GPU queries from its pending-task pump
+      * rather than blocking END_QUERY on GetData.  The display refresh callback
+      * is QEMU's regular renderer-service point. */
+@@ -11506,10 +11535,46 @@
+                            vmstate_vmvga_internal, struct vmsvga_state_s),
+             VMSTATE_END_OF_LIST()}};
+ 
++/* GTK window resize -> SVGA display topology + Resolution_Set. */
++static void vmsvga_ui_info(void *opaque, uint32_t idx, QemuUIInfo *info)
++{
++    struct vmsvga_state_s *s = opaque;
++    char *msg;
++
++    if (idx != 0 || info == NULL || info->width == 0 || info->height == 0) {
++        return;
++    }
++
++    s->disp_prim = 1;
++    s->disp_x = 0;
++    s->disp_y = 0;
++    s->disp_width = info->width;
++    s->disp_height = info->height;
++    s->reso_wanted_width = info->width;
++    s->reso_wanted_height = info->height;
++    s->reso_sends = 0;
++    s->reso_last_send_ms = 0; /* send on the next display tick */
++
++    if (s->enable && s->active_width != 0 && s->active_height != 0) {
++        vmsvga_damage_add(s, 0, 0, s->active_width, s->active_height);
++    }
++
++    /* Windows Tools applies Resolution_Set on the TCLO channel;
++     * DisplayTopology_Set is the fallback for older tools. */
++    msg = g_strdup_printf("Resolution_Set %u %u", info->width, info->height);
++    vmport_guestrpc_send_to_tclo(msg);
++    g_free(msg);
++    msg = g_strdup_printf("DisplayTopology_Set 1 , 0 0 %u %u",
++                          info->width, info->height);
++    vmport_guestrpc_send_to_guest(msg);
++    g_free(msg);
++}
++
+ static GraphicHwOps vmsvga_ops = {
+       .invalidate = vmsvga_invalidate_display,
+       .gfx_update = vmsvga_update_display,
+       .text_update = vmsvga_text_update,
++      .ui_info = vmsvga_ui_info,
+ };
+ 
+ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
+@@ -11758,6 +11823,15 @@
+         return;
+     }
+ 
++    /* Publish an XML-specified mode in the display-topology registers. */
++    if (s->chip.reso_wanted_width != 0 && s->chip.reso_wanted_height != 0) {
++        s->chip.disp_prim = 1;
++        s->chip.disp_x = 0;
++        s->chip.disp_y = 0;
++        s->chip.disp_width = s->chip.reso_wanted_width;
++        s->chip.disp_height = s->chip.reso_wanted_height;
++    }
++
+     dev->config[PCI_INTERRUPT_PIN] = 1;
+     dev->config[PCI_INTERRUPT_LINE] = 0xff;
+     dev->config[PCI_LATENCY_TIMER] = 64;
+@@ -11870,6 +11944,11 @@
+       DEFINE_PROP_BOOL("3d", struct pci_vmsvga_state_s,
+                        chip.enable_3d, true),
+       DEFINE_PROP_STRING("vgpu", struct pci_vmsvga_state_s, chip.vgpu),
++      /* Fixed host-requested resolution; 0 follows guest/window size. */
++      DEFINE_PROP_UINT32("disp-width", struct pci_vmsvga_state_s,
++                         chip.reso_wanted_width, 0),
++      DEFINE_PROP_UINT32("disp-height", struct pci_vmsvga_state_s,
++                         chip.reso_wanted_height, 0),
+       VMVGA_PROPERTY_END
+ };
+ 
+--- a/hw/i386/vmport.c
++++ b/hw/i386/vmport.c
+@@ -76,6 +76,7 @@
+ /* Low-bandwidth VMware GuestRPC protocol used by RPCI. */
+ #define VMPORT_GUESTRPC_CMD_MESSAGE    ((VMPortCommand)30)
+ #define VMPORT_GUESTRPC_PROTOCOL       0x49435052 /* "RPCI" */
++#define VMPORT_GUESTRPC_PROTO_TCLO     0x4F4C4354 /* "TCLO" */
+ #define VMPORT_GUESTRPC_COOKIE_FLAG    0x80000000
+ #define VMPORT_GUESTRPC_MAX_CHANNELS   128
+ #define VMPORT_GUESTRPC_MAX_MESSAGE    (64 * 1024)
+@@ -100,6 +101,7 @@
+ typedef struct VMPortGuestRPCChannelState {
+     bool open;
+     bool uses_cookie;
++    bool tclo;
+     uint32_t cookie;
+     int64_t last_activity;
+     uint32_t request_size;
+@@ -161,6 +163,9 @@
+     VMPortGuestRPCChannel guestrpc[VMPORT_GUESTRPC_MAX_CHANNELS];
+     VMPortGuestRPCRuntimeState guestrpc_runtime;
+     GHashTable *guestinfo;
++    /* Host-initiated messages awaiting guest pickup. */
++    char *pending_guestmsg;
++    char *pending_tclo_msg;
+ };
+ 
+ static VMPortState *port_state;
+@@ -281,6 +286,7 @@
+ 
+ static void vmport_guestrpc_reset_channel(VMPortGuestRPCChannel *channel)
+ {
++    channel->state.tclo = false;
+     g_free(channel->request);
+     g_free(channel->reply);
+ 
+@@ -460,6 +466,41 @@
+     channel->state.reply_pos = 0;
+ }
+ 
++static bool vmport_guestrpc_send_to_proto(const char *msg, bool tclo);
++
++/* RPCI send: copy and deliver on the next idle RECVSIZE poll. */
++bool vmport_guestrpc_send_to_guest(const char *msg)
++{
++    return vmport_guestrpc_send_to_proto(msg, false);
++}
++
++/* TCLO (toolbox) send; the guest replies "OK ..." via its send path. */
++bool vmport_guestrpc_send_to_tclo(const char *msg)
++{
++    return vmport_guestrpc_send_to_proto(msg, true);
++}
++
++static bool vmport_guestrpc_send_to_proto(const char *msg, bool tclo)
++{
++    VMPortState *s = port_state;
++
++    if (s != NULL && vmport_guestrpc_debug_enabled(s)) {
++        fprintf(stderr, "vmport-guestrpc: send_to_%s '%s'\n",
++                tclo ? "tclo" : "guest", msg);
++    }
++    if (s == NULL || msg == NULL || *msg == '\0') {
++        return false;
++    }
++    if (tclo) {
++        g_free(s->pending_tclo_msg);
++        s->pending_tclo_msg = g_strdup(msg);
++    } else {
++        g_free(s->pending_guestmsg);
++        s->pending_guestmsg = g_strdup(msg);
++    }
++    return true;
++}
++
+ static const char *vmport_guestrpc_guestinfo_override(const char *key)
+ {
+     if (vmport_guestrpc_enable_vm3d_logging) {
+@@ -503,6 +544,12 @@
+                                   channel->state.request_size);
+     }
+ 
++    /* TCLO traffic is the guest's reply to our events; consume it. */
++    if (channel->state.tclo) {
++        g_free(request);
++        return;
++    }
++
+     if (g_str_has_prefix(request, info_get_prefix)) {
+         key = request + sizeof(info_get_prefix) - 1;
+         if (g_str_has_prefix(key, "guestinfo.")) {
+@@ -548,6 +595,14 @@
+         vmport_guestrpc_set_reply(channel, g_strdup("0 Unknown command"));
+     }
+ 
++    /* The tools client never polls an idle channel, so deliver a queued
++     * host message in place of the reply to its next request.  The
++     * displaced reply is dropped and the caller retries. */
++    if (s->pending_guestmsg != NULL) {
++        vmport_guestrpc_set_reply(channel, s->pending_guestmsg);
++        s->pending_guestmsg = NULL;
++    }
++
+     if (!g_str_has_prefix(request, "log ")) {
+         vmport_guestrpc_print_reply(s, channel->reply,
+                                     channel->state.reply_size);
+@@ -583,7 +638,9 @@
+ 
+         value = env->regs[R_EBX];
+         if ((value & ~VMPORT_GUESTRPC_COOKIE_FLAG) !=
+-            VMPORT_GUESTRPC_PROTOCOL) {
++                VMPORT_GUESTRPC_PROTOCOL &&
++            (value & ~VMPORT_GUESTRPC_COOKIE_FLAG) !=
++                VMPORT_GUESTRPC_PROTO_TCLO) {
+             return vmport_guestrpc_status(cpu, 0);
+         }
+ 
+@@ -592,6 +649,8 @@
+                 channel = &s->guestrpc[i];
+                 vmport_guestrpc_reset_channel(channel);
+                 channel->state.open = true;
++                channel->state.tclo = (value & ~VMPORT_GUESTRPC_COOKIE_FLAG) ==
++                                      VMPORT_GUESTRPC_PROTO_TCLO;
+                 channel->state.uses_cookie =
+                     !!(value & VMPORT_GUESTRPC_COOKIE_FLAG);
+                 channel->state.last_activity = now;
+@@ -660,11 +719,23 @@
+         return vmport_guestrpc_status(cpu, VMPORT_GUESTRPC_SUCCESS);
+ 
+     case VMPORT_GUESTRPC_RECVSIZE:
+-
+         channel = vmport_guestrpc_channel(s, id, cookie, now);
+         if (!channel) {
+             return vmport_guestrpc_status(cpu, 0);
+         }
++        /* Deliver a queued host message; TCLO data is a full C string. */
++        if (!channel->reply) {
++            if (channel->state.tclo && s->pending_tclo_msg != NULL) {
++                char *msg = s->pending_tclo_msg;
++                s->pending_tclo_msg = NULL;
++                /* bare message, exactly as the VMX sends it */
++                vmport_guestrpc_set_reply(channel, msg);
++            } else if (!channel->state.tclo &&
++                       s->pending_guestmsg != NULL) {
++                vmport_guestrpc_set_reply(channel, s->pending_guestmsg);
++                s->pending_guestmsg = NULL;
++            }
++        }
+         if (!channel->reply) {
+             return vmport_guestrpc_status(cpu, VMPORT_GUESTRPC_SUCCESS);
+         }
+@@ -691,6 +762,13 @@
+             value |= (uint32_t)(uint8_t)channel->reply[channel->state.reply_pos++]
+                      << (i * 8);
+         }
++        /* One-shot: free the reply once fully read. */
++        if (channel->state.reply_pos >= channel->state.reply_size) {
++            g_free(channel->reply);
++            channel->reply = NULL;
++            channel->state.reply_size = 0;
++            channel->state.reply_pos = 0;
++        }
+         env->regs[R_EBX] = value;
+         env->regs[R_EDX] = (uint32_t)((env->regs[R_EDX] & 0xffff) |
+                                       (VMPORT_GUESTRPC_SENDPAYLOAD << 16));
+--- a/hw/i386/vmport-vmvga.h
++++ b/hw/i386/vmport-vmvga.h
+@@ -7,4 +7,8 @@
+ bool vmport_register_svga_capability_provider(
+     VMPortSVGACapabilityFunc *func, void *opaque);
+ 
++/* Queue a host-initiated message for the guest's next RECVSIZE poll. */
++bool vmport_guestrpc_send_to_guest(const char *msg);
++bool vmport_guestrpc_send_to_tclo(const char *msg);
++
+ #endif

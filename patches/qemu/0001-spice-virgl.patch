@@ -1,0 +1,16 @@
+--- a/ui/console.c
++++ b/ui/console.c
+@@ -572,8 +572,12 @@
+ 
+     flags = con->hw_ops->get_flags ? con->hw_ops->get_flags(con->hw) : 0;
+ 
++    /* vmgr: exempt only the spice DCL from the GL-compat probe.  It
++     * carries no display payload, just vdagent/usbredir channels. */
+     if (qemu_console_has_gl(con) &&
+-        !con->gl->ops->dpy_gl_ctx_is_compatible_dcl(con->gl, dcl)) {
++        !con->gl->ops->dpy_gl_ctx_is_compatible_dcl(con->gl, dcl) &&
++        !(dcl->ops->dpy_name &&
++          strcmp(dcl->ops->dpy_name, "spice") == 0)) {
+         error_setg(errp, "Display %s is incompatible with the GL context",
+                    dcl->ops->dpy_name);
+         return false;

@@ -1,0 +1,59 @@
+#!/bin/bash
+# Bind or release one IOMMU group for vfio.  Installed with a matching
+# sudoers entry by install.sh --sessionvfio.
+set -eu
+usage() {
+    echo "usage: vmm-vfio-ctl bind|unbind|status DOMAIN:BUS:SLOT.FUNC" >&2
+    exit 2
+}
+[ $# = 2 ] || usage
+cmd=$1
+bdf=${2#0000:}
+bdf=${bdf,,}
+dev=/sys/bus/pci/devices/$bdf
+[ -e "$dev" ] || { echo "vmm-vfio-ctl: no device $bdf" >&2; exit 1; }
+
+group_devices() {
+    local d
+    for d in "$dev"/iommu_group/devices/*; do
+        [ -e "$d" ] && basename "$d"
+    done
+}
+
+bind_one() {
+    local d=$1 driver=
+    [ -e "/sys/bus/pci/devices/$d/driver" ] &&
+        driver=$(basename "$(readlink -f "/sys/bus/pci/devices/$d/driver")")
+    if [ -n "$driver" ] && [ "$driver" != vfio-pci ]; then
+        echo "$d" > "/sys/bus/pci/drivers/$driver/unbind"
+    fi
+    echo vfio-pci > "/sys/bus/pci/devices/$d/driver_override"
+    echo "$d" > /sys/bus/pci/drivers/vfio-pci/bind
+}
+
+case "$cmd" in
+    bind)
+        modprobe vfio-pci
+        for d in $(group_devices); do bind_one "$d"; done
+        ;;
+    unbind)
+        for d in $(group_devices); do
+            driver=
+            [ -e "/sys/bus/pci/devices/$d/driver" ] &&
+                driver=$(basename "$(readlink -f "/sys/bus/pci/devices/$d/driver")")
+            [ "$driver" = vfio-pci ] &&
+                echo "$d" > /sys/bus/pci/drivers/vfio-pci/unbind
+            : > "/sys/bus/pci/devices/$d/driver_override"
+        done
+        echo 1 > /sys/bus/pci/rescan
+        ;;
+    status)
+        for d in $(group_devices); do
+            driver=
+            [ -e "/sys/bus/pci/devices/$d/driver" ] &&
+                driver=$(basename "$(readlink -f "/sys/bus/pci/devices/$d/driver")")
+            printf '%s %s\n' "$d" "${driver:-none}"
+        done
+        ;;
+    *) usage ;;
+esac

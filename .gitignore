@@ -1,0 +1,15 @@
+# build and output
+/build/
+/prefix/
+
+# runtime
+/src/
+/run/
+/state/
+*.log
+
+# local host config
+/share/host.local
+/share/examples/*.local.xml
+/share/examples/*.xml
+__pycache__/

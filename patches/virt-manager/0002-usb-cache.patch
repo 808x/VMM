@@ -1,0 +1,13 @@
+--- a/virtManager/details/viewers.py
++++ b/virtManager/details/viewers.py
+@@ -552,6 +552,10 @@
+             _SIGS.connect(self._usbdev_manager, "auto-connect-failed", self._usbdev_redirect_error)
+             _SIGS.connect(self._usbdev_manager, "device-error", self._usbdev_redirect_error)
+ 
++            # Install before open_fd() so the first scan is captured.
++            from .. import usb_redirect
++            usb_redirect.ensure_cache(self._usbdev_manager)
++
+             autoredir = self.config.get_auto_usbredir()
+             if autoredir:
+                 gtk_session.set_property("auto-usbredir", True)

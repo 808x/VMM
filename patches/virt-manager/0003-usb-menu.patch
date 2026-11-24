@@ -1,0 +1,185 @@
+--- a/virtManager/vmmenu.py
++++ b/virtManager/vmmenu.py
+@@ -10,6 +10,8 @@
+ 
+ from .asyncjob import vmmAsyncJob
+ 
++from . import usb_redirect
++
+ 
+ ####################################################################
+ # Build toolbar shutdown button menu (manager and details toolbar) #
+@@ -79,6 +81,102 @@
+                 child.set_sensitive(statemap[name])
+ 
+ 
++
++
++class VMUsbRedirectMenu(_VMMenu):
++    """USB redirect submenu; rows are rebuilt from the spice manager."""
++
++    def _init_state(self):
++        self._dev_items = []
++        self._updating = False
++        self._pending = False
++        self._last_sig = None
++        self._err = usb_redirect.MenuErrorSink(self)
++
++        self._all_item = self._add_action(
++            _("_All devices"), "usb-all-devices",
++            lambda parent, ignore: parent.control_vm_usb_redirection(None))
++        self._separator = Gtk.SeparatorMenuItem()
++        self.insert(self._separator, 0)
++        self.connect("unmap", self._menu_unmapped)
++
++        self.get_accessible().set_name("vmm-usb-redirect-menu")
++        self.show_all()
++
++    def _get_manager(self):
++        console = getattr(self._parent, "_console", None)
++        if console is None:  # pragma: no cover
++            return None
++        try:
++            return console.vmwindow_viewer_get_usb_manager()
++        except Exception:  # pragma: no cover
++            log.debug("Error looking up spice USB manager", exc_info=True)
++            return None
++
++    def update_widget_states(self, vm):
++        if self._updating:
++            return
++
++        if self.get_mapped():
++            self._pending = True
++            return
++
++        self._updating = True
++        try:
++            manager = self._get_manager()
++            devices = usb_redirect.list_devices(manager)
++
++            sig = (id(manager),
++                   tuple((usb_redirect.menu_label(d),
++                          usb_redirect.is_connected(manager, d))
++                         for d in devices),
++                   bool(vm and vm.is_active()))
++            if sig == self._last_sig:
++                self._all_item.set_sensitive(sig[1])
++                self._separator.set_visible(bool(devices))
++                return
++            self._last_sig = sig
++
++            for item in self._dev_items:
++                self.remove(item)
++            self._dev_items = []
++
++            # Building the order directly avoids reorder_child() after the
++            # submenu is realized, which did not take effect.
++            self.remove(self._separator)
++            self.remove(self._all_item)
++
++            for dev in devices:
++                item = Gtk.CheckMenuItem(label=usb_redirect.menu_label(dev))
++                item.set_active(usb_redirect.is_connected(manager, dev))
++                item.set_tooltip_text(
++                    usb_redirect.device_tooltip(manager, dev))
++                item.connect("toggled", self._device_toggled, manager, dev)
++                self.add(item)
++                item.show()
++                self._dev_items.append(item)
++
++            self.add(self._separator)
++            self.add(self._all_item)
++            self._all_item.show()
++
++            self._all_item.set_sensitive(bool(vm and vm.is_active()))
++            self._separator.set_visible(bool(self._dev_items))
++        finally:
++            self._updating = False
++
++    def _device_toggled(self, chk, manager, dev):
++        if self._updating:
++            return
++        usb_redirect.toggle_device(chk, manager, self._err, dev)
++
++    def _menu_unmapped(self, _menu):
++        self._err.flush()
++        if not self._pending:
++            return
++        self._pending = False
++        self.update_widget_states(self._current_vm_cb())
++
+ class VMActionMenu(_VMMenu):
+     """
+     VM submenu for run, pause, shutdown, clone, etc
+--- a/virtManager/vmwindow.py
++++ b/virtManager/vmwindow.py
+@@ -164,6 +164,9 @@
+         self._shutdownmenu = None
+         self._vmmenu.destroy()
+         self._vmmenu = None
++        if getattr(self, "_usbmenu", None):
++            self._usbmenu.destroy()
++            self._usbmenu = None
+ 
+         if self._window_size:
+             self.vm.set_details_window_size(*self._window_size)
+@@ -280,6 +283,9 @@
+             self._console.vmwindow_get_console_list_menu()
+         )
+ 
++        self._usbmenu = vmmenu.VMUsbRedirectMenu(self, lambda: self.vm)
++        self.widget("details-menu-usb-redirection").set_submenu(self._usbmenu)
++
+     ##########################
+     # Window state listeners #
+     ##########################
+@@ -608,7 +614,12 @@
+ 
+     def _console_refresh_can_usbredir(self):
+         can_usb = self._console.vmwindow_viewer_can_usb_redirect()
++        if not self.vm.is_active():
++            can_usb = False
+         self.widget("details-menu-usb-redirection").set_sensitive(bool(can_usb))
++        usbmenu = getattr(self, "_usbmenu", None)
++        if usbmenu:
++            usbmenu.update_widget_states(self.vm)
+ 
+     def _console_refresh_can_fullscreen(self):
+         allow_fullscreen = self._console.vmwindow_get_viewer_is_visible()
+--- a/virtManager/details/console.py
++++ b/virtManager/details/console.py
+@@ -907,6 +907,11 @@
+     def vmwindow_viewer_get_usb_widget(self):
+         return self._viewer.console_get_usb_widget()
+ 
++    def vmwindow_viewer_get_usb_manager(self):
++        if not self._viewer:  # pragma: no cover
++            return None
++        return self._viewer.console_get_usb_manager()
++
+     def vmwindow_viewer_get_pixbuf(self):
+         return self._viewer.console_get_pixbuf()
+ 
+--- a/virtManager/details/viewers.py
++++ b/virtManager/details/viewers.py
+@@ -301,6 +301,9 @@
+     def console_get_usb_widget(self):
+         return self._get_usb_widget()
+ 
++    def console_get_usb_manager(self):
++        return self._usbdev_manager
++
+     def console_has_usb_redirection(self):
+         return self._has_usb_redirection()
+ 
+--- a/ui/vmwindow.ui
++++ b/ui/vmwindow.ui
+@@ -95,6 +95,7 @@
+                       <object class="GtkMenuItem" id="details-menu-usb-redirection">
+                         <property name="visible">True</property>
+                         <property name="can-focus">False</property>
++                        <property name="sensitive">False</property>
+                         <property name="tooltip-text" translatable="yes">Redirect host USB device to virtual machine with SPICE graphics.</property>
+                         <property name="label" translatable="yes">_Redirect USB device</property>
+                         <property name="use-underline">True</property>

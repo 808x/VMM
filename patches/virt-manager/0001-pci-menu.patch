@@ -1,0 +1,230 @@
+--- a/virtManager/vmmenu.py
++++ b/virtManager/vmmenu.py
+@@ -5,9 +5,12 @@
+ # See the COPYING file in the top-level directory.
+ 
+ from gi.repository import Gtk
++from gi.repository import GLib
+ 
+ from virtinst import log
+ 
++from . import pci_redirect
++
+ from .asyncjob import vmmAsyncJob
+ 
+ 
+@@ -48,6 +51,116 @@
+         raise NotImplementedError()
+ 
+ 
++
++
++class VMRedirectMenu(_VMMenu):
++    """Curated PCI redirect submenu; attached rows survive re-curation."""
++
++    def _init_state(self):
++        self._dev_items = {}
++        self._updating = False
++        self._pending_vm = None
++        self._err = pci_redirect.MenuErrorSink(self)
++
++        self._more_item = self._add_action(
++            _("_All devices"), "pci-more-devices",
++            lambda parent, ignore: parent.control_vm_pci_redirection(None))
++        self._separator = Gtk.SeparatorMenuItem()
++        self.insert(self._separator, 0)
++
++        self.get_accessible().set_name("vmm-pci-redirect-menu")
++        self.connect("unmap", self._menu_unmapped)
++        self.show_all()
++
++    def _make_item(self, vm, addr, xmlobj):
++        if xmlobj is not None:
++            label = pci_redirect.device_label(xmlobj)
++        else:  # pragma: no cover
++            label = pci_redirect.pci_addr_label(addr)
++
++        item = Gtk.CheckMenuItem(label=label)
++        item.set_tooltip_text(pci_redirect.device_tooltip(xmlobj, vm))
++        item.connect("toggled", self._device_toggled, vm, addr)
++        return item
++
++    def update_widget_states(self, vm):
++        if self._updating:
++            return
++
++        # Mutating a mapped popup does not relayout reliably.
++        if self.get_mapped():
++            self._pending_vm = vm
++            return
++
++        self._updating = True
++        try:
++            entries = {}
++            attached = set()
++
++            if vm:
++                attached = set(pci_redirect.state_pci_addrs(vm))
++                for dev in pci_redirect.list_redirectable_pci_devices(vm):
++                    entries[pci_redirect.nodedev_pci_addr(dev.xmlobj)] = \
++                        dev.xmlobj
++
++                # Keep attached devices visible so they can be turned off.
++                for addr in attached:
++                    if addr in entries:
++                        continue
++                    nodedev = pci_redirect.nodedev_from_addr(vm.conn, addr)
++                    entries[addr] = nodedev.xmlobj if nodedev else None
++
++            for addr, item in list(self._dev_items.items()):
++                if addr not in entries:
++                    self.remove(item)
++                    del self._dev_items[addr]
++
++            for addr, xmlobj in entries.items():
++                if addr not in self._dev_items:
++                    item = self._make_item(vm, addr, xmlobj)
++                    self._dev_items[addr] = item
++                    self.append(item)
++                    item.show()
++
++            desired = [self._dev_items[a]
++                       for a in sorted(entries, reverse=True)]
++            desired += [self._separator, self._more_item]
++            current = self.get_children()
++            for idx, item in enumerate(desired):
++                if idx >= len(current) or current[idx] is not item:
++                    self.reorder_child(item, idx)
++                    current = self.get_children()
++
++            for addr, item in self._dev_items.items():
++                active = addr in attached
++                if item.get_active() != active:
++                    item.set_active(active)
++                tip = pci_redirect.device_tooltip(entries[addr], vm)
++                if item.get_tooltip_text() != tip:
++                    item.set_tooltip_text(tip)
++
++            self._separator.set_visible(bool(self._dev_items))
++        finally:
++            self._updating = False
++
++    def _device_toggled(self, chk, vm, addr):
++        if self._updating:
++            return
++        pci_redirect.toggle_device(chk, vm, self._err, addr)
++        GLib.idle_add(self._refresh_idle, vm)
++
++    def _menu_unmapped(self, _menu):
++        self._err.flush()
++        if self._pending_vm is None:
++            return
++        vm = self._pending_vm
++        self._pending_vm = None
++        GLib.idle_add(self._refresh_idle, vm)
++
++    def _refresh_idle(self, vm):
++        self.update_widget_states(vm)
++        return False
++
+ class VMShutdownMenu(_VMMenu):
+     """
+     Shutdown submenu for reboot, forceoff, reset, etc.
+--- a/virtManager/vmwindow.py
++++ b/virtManager/vmwindow.py
+@@ -88,6 +88,7 @@
+ 
+         self._shutdownmenu = None
+         self._vmmenu = None
++        self._pcimenu = None
+         self.init_menus()
+ 
+         self.builder.connect_signals(
+@@ -160,6 +161,9 @@
+         self._snapshots = None
+         self._details.cleanup()
+         self._details = None
++        if self._pcimenu:
++            self._pcimenu.destroy()
++            self._pcimenu = None
+         self._shutdownmenu.destroy()
+         self._shutdownmenu = None
+         self._vmmenu.destroy()
+@@ -269,6 +273,10 @@
+         topmenu.set_submenu(self._vmmenu)
+         topmenu.show_all()
+ 
++        # Must be a _VMMenu: VMActionMenu refreshes every child submenu.
++        self._pcimenu = vmmenu.VMRedirectMenu(self, lambda: self.vm)
++        self.widget("details-menu-pci-redirection").set_submenu(self._pcimenu)
++
+         self.widget("details-pages").set_show_tabs(False)
+         self.widget("details-menu-view-toolbar").set_active(self.config.get_details_show_toolbar())
+ 
+@@ -512,6 +520,14 @@
+             buttons=Gtk.ButtonsType.CLOSE,
+         )
+ 
++    def control_vm_pci_redirection(self, src):
++        ignore = src
++
++        from . import pci_redirect
++
++        pci_redirect.show_pci_redirect_dialog(self.vm, self.topwin, self.err)
++        self._console_refresh_can_pci()
++
+     def _take_screenshot(self):
+         image = self._console.vmwindow_viewer_get_pixbuf()
+ 
+@@ -604,6 +620,7 @@
+ 
+         self._console_refresh_can_usbredir()
+         self._console_refresh_can_fullscreen()
++        self._console_refresh_can_pci()
+         self._console_refresh_resizeguest_from_settings()
+ 
+     def _console_refresh_can_usbredir(self):
+@@ -617,6 +634,13 @@
+         self.widget("details-menu-view-fullscreen").set_sensitive(allow_fullscreen)
+         self.widget("detains-menu-view-size-to-vm").set_sensitive(allow_fullscreen)
+ 
++    def _console_refresh_can_pci(self):
++        from . import pci_redirect
++        can_pci = bool(pci_redirect.list_redirectable_pci_devices(self.vm))
++        self.widget("details-menu-pci-redirection").set_sensitive(can_pci)
++        if self._pcimenu:
++            self._pcimenu.update_widget_states(self.vm)
++
+     def _console_refresh_scaling_from_settings(self):
+         scale_type = self.vm.get_console_scaling()
+         self.widget("details-menu-view-scale-always").set_active(
+--- a/ui/vmwindow.ui
++++ b/ui/vmwindow.ui
+@@ -101,6 +101,15 @@
+                         <signal name="activate" handler="on_details_menu_usb_redirection" swapped="no"/>
+                       </object>
+                     </child>
++                    <child>
++                      <object class="GtkMenuItem" id="details-menu-pci-redirection">
++                        <property name="visible">True</property>
++                        <property name="can-focus">False</property>
++                        <property name="tooltip-text" translatable="yes">Attach or detach a passed-through PCI device. Live while the VM is running, saved configuration while it is stopped.</property>
++                        <property name="label" translatable="yes">_Redirect PCI device</property>
++                        <property name="use-underline">True</property>
++                      </object>
++                    </child>
+                   </object>
+                 </child>
+               </object>
+--- a/virtinst/nodedev.py
++++ b/virtinst/nodedev.py
+@@ -147,6 +147,9 @@
+     product_name = XMLProperty("./capability/product")
+     vendor_name = XMLProperty("./capability/vendor")
+     _capability_type = XMLProperty("./capability/capability/@type")
++    pci_class = XMLProperty("./capability/class")
++    driver_name = XMLProperty("./driver/name")
++    iommu_group = XMLProperty("./capability/iommuGroup/@number", is_int=True)
+ 
+     # type='usb' options
+     device = XMLProperty("./capability/device")
