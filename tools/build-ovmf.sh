@@ -42,8 +42,8 @@ OUT="$(cd "$OUT" && pwd)"
 VMM_CFLAGS="${VMM_CFLAGS:-}"
 VMM_CXXFLAGS="${VMM_CXXFLAGS:-}"
 # Remove flags not supported by GCC < 13
-VMM_CFLAGS=$(echo "$VMM_CFLAGS" | sed 's/-fno-diagnostics-show-caret//g; s/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
-VMM_CXXFLAGS=$(echo "$VMM_CXXFLAGS" | sed 's/-fno-diagnostics-show-caret//g; s/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
+VMM_CFLAGS=$(echo "$VMM_CFLAGS" | sed 's/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
+VMM_CXXFLAGS=$(echo "$VMM_CXXFLAGS" | sed 's/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
 
 for tool in gcc make python3 nasm; do
     command -v "$tool" >/dev/null || {
@@ -133,8 +133,10 @@ build_one() {
     local name="$1" code="$2" vars="$3"; shift 3
     note "$name"
     rm -rf "$SRC/Build/OvmfX64"
+    local quiet=()
+    [ "${VMM_VERBOSE:-0}" = 1 ] || quiet=(-q)
     ( cd "$SRC" && "$BUILD" -a X64 -t GCC5 -b RELEASE \
-        -p OvmfPkg/OvmfPkgX64.dsc -D FD_SIZE_4MB "$@" -n "$JOBS" )
+        -p OvmfPkg/OvmfPkgX64.dsc -D FD_SIZE_4MB ${quiet[@]+"${quiet[@]}"} "$@" -n "$JOBS" )
     mkdir -p "$OUT"
     cp "$FV/OVMF_CODE.fd" "$OUT/$code"
     cp "$FV/OVMF_VARS.fd" "$OUT/$vars"

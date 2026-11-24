@@ -118,18 +118,19 @@ else
     c_reset=""
 fi
 
-# Build output filtering: collapse repetitive lines sharing the same prefix.
-# Threshold = consecutive lines before collapsing (default 4).
-# Prefix length = characters to compare (default 12).
-FILTER_THRESHOLD="${VMM_FILTER_THRESHOLD:-4}"
-FILTER_PREFIX_LEN="${VMM_FILTER_PREFIX_LEN:-12}"
-FILTER_ENABLED="${VMM_FILTER_ENABLED:-1}"
+# Build output. By default the full output of a build phase goes to
+# build/logs/<phase>.log and the terminal stays quiet; if the phase fails the
+# end of that log is printed. VMM_VERBOSE=1 or --verbose streams everything
+# and keeps a copy in the log.
+VERBOSE="${VMM_VERBOSE:-0}"
 
 # Compiler diagnostic flags (non-intrusive: affect output only, not codegen).
 # -Wno-error: warnings non-fatal
 # -Wno-macro-redefined: silence D3D8/D3D9 macro collisions (DXVK)
+# -fno-diagnostics-show-caret / -fno-diagnostics-show-line-numbers: drop the
+#   "^~~~~~" source excerpts and line gutters from warnings.
 # Override via VMM_CFLAGS/VMM_CXXFLAGS env vars (e.g. "" to use project defaults).
-VMM_DIAG_FLAGS="-Wno-error -Wno-macro-redefined"
+VMM_DIAG_FLAGS="-Wno-error -Wno-macro-redefined -fno-diagnostics-show-caret -fno-diagnostics-show-line-numbers"
 if [ -n "${VMM_CFLAGS+x}" ] && [ -n "$VMM_CFLAGS" ]; then
     VMM_CFLAGS="$VMM_CFLAGS $VMM_DIAG_FLAGS"
 else
@@ -142,40 +143,27 @@ else
 fi
 export VMM_CFLAGS VMM_CXXFLAGS
 
-filter_output() {
-    # Usage: command | filter_output
-    # Collapses consecutive lines sharing the same leading prefix.
-    # Output format: first_line \n [... N collapsed] last_line
-    local threshold="${FILTER_THRESHOLD:-4}"
-    local prefix_len="${FILTER_PREFIX_LEN:-12}"
-    local enabled="${FILTER_ENABLED:-1}"
-    [ "$enabled" = 1 ] || { cat; return; }
-
-    local line prefix count=0 last_prefix="" group=()
-    while IFS= read -r line; do
-        prefix="${line:0:prefix_len}"
-        if [ "$prefix" = "$last_prefix" ] && [ -n "$prefix" ]; then
-            count=$((count + 1))
-            group+=("$line")
-            continue
-        else
-            if [ "$count" -ge "$threshold" ] && [ ${#group[@]} -gt 0 ]; then
-                echo "${group[0]}"
-                echo "[... $((count - 1)) collapsed] ${group[-1]}"
-            elif [ "$count" -gt 0 ]; then
-                printf '%s\n' "${group[@]}"
-            fi
-            count=1
-            last_prefix="$prefix"
-            group=("$line")
-        fi
-    done
-    if [ "$count" -ge "$threshold" ] && [ ${#group[@]} -gt 0 ]; then
-        echo "${group[0]}"
-        echo "[... $((count - 1)) collapsed] ${group[-1]}"
-    elif [ "$count" -gt 0 ]; then
-        printf '%s\n' "${group[@]}"
+build_run() {
+    # Usage: build_run LOG LABEL command [args...]
+    # Quiet: write everything to LOG, print nothing unless the command fails,
+    # in which case show the last 60 lines. Verbose: stream and keep a copy.
+    local log="$1" label="$2"; shift 2
+    local rc
+    mkdir -p "$(dirname "$log")"
+    : > "$log"
+    if [ "$VERBOSE" = 1 ]; then
+        "$@" 2>&1 | tee -a "$log"
+        rc=${PIPESTATUS[0]}
+    else
+        "$@" > "$log" 2>&1
+        rc=$?
     fi
+    if [ "$rc" -ne 0 ]; then
+        printf '\n' >&2
+        warn "$label failed; last 60 lines of $log"
+        tail -n 60 "$log" >&2
+    fi
+    return "$rc"
 }
 
 usage() {
@@ -209,6 +197,7 @@ usage: ./install.sh [actions]
    --jobs=N                       parallel build jobs (default: nproc)
    --dxvk-tarball=FILE            use this dxvk-native tarball instead of building
    --dry-run                      resolve and report, change nothing
+   --verbose                      stream build output (default: log only)
    -h, --help
 
  Patch groups: see --list-patches.  Patch values accept both the manifest
@@ -370,6 +359,7 @@ while [ $# -gt 0 ]; do
         --jobs=*) jobs="${1#*=}"; shift ;;
         --dxvk-tarball=*) dxvk_tarball="${1#*=}"; shift ;;
         --dry-run) dry_run=1; shift ;;
+        --verbose) VERBOSE=1; shift ;;
         *) die "unknown option '$1' (see --help)" ;;
     esac
 done
@@ -2318,8 +2308,11 @@ dxvk_build() {
             "$(conf_get dxvk-native url)" "$src" || die "dxvk clone failed"
     fi
     note "build dxvk-native $dxvk_lock"
-    ( cd "$src" && ./package-native.sh "$ver" "$BUILD/dxvk-out" --64-only ) ||
-        die "dxvk-native build failed"
+    _dxvk_package() {
+        ( cd "$src" && ./package-native.sh "$ver" "$BUILD/dxvk-out" --64-only )
+    }
+    build_run "$BUILD/logs/dxvk-native-build.log" "dxvk-native build" \
+        _dxvk_package || die "dxvk-native build failed"
     cp "$BUILD/dxvk-out/dxvk-native-$ver.tar.gz" "$out" || die "dxvk package missing"
     rm -rf "$BUILD/dxvk-out"
     DXVK_TARBALL="$out"
@@ -2334,22 +2327,25 @@ build_vm() {
     # A build dir configured from a previous directory name cannot be
     # reused after the tree moves; recreate it instead of failing.
     if [ -f "$bdir/build.ninja" ]; then
-        if ! meson setup --reconfigure "$bdir" "$src" \
+        if ! build_run "$BUILD/logs/virt-manager-setup.log" \
+                "virt-manager reconfigure" \
+                env CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
+                meson setup --reconfigure "$bdir" "$src" \
                 --prefix="$prefix" --buildtype=release; then
             note "stale virt-manager build dir; recreating"
             rm -rf "$bdir"
         fi
     fi
     if [ ! -f "$bdir/build.ninja" ]; then
-        CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
-        meson setup "$bdir" "$src" \
+        build_run "$BUILD/logs/virt-manager-setup.log" "virt-manager configure" \
+            env CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
+            meson setup "$bdir" "$src" \
             --prefix="$prefix" --buildtype=release || return 1
     fi
-    local log="$BUILD/logs/virt-manager-build.log"
-    mkdir -p "$(dirname "$log")"
-    CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
-    ninja -C "$bdir" -j "$jobs" 2>&1 | tee "$log" | filter_output || return 1
-    ninja -C "$bdir" install 2>&1 | tee -a "$log" | filter_output || return 1
+    build_run "$BUILD/logs/virt-manager-build.log" "virt-manager build" \
+        ninja -C "$bdir" -j "$jobs" || return 1
+    build_run "$BUILD/logs/virt-manager-install.log" "virt-manager install" \
+        ninja -C "$bdir" install || return 1
     install_vm_modules
     note "virt-manager installed to $prefix"
 }
@@ -2378,13 +2374,12 @@ build_qemu() {
     [ -d "$SRC/qemu-$qemu_lock" ] || die "missing qemu source"
     dxvk_build
     export VMM_CFLAGS VMM_CXXFLAGS
-    export FILTER_THRESHOLD FILTER_PREFIX_LEN FILTER_ENABLED
     local log="$BUILD/logs/qemu-build.log"
-    mkdir -p "$(dirname "$log")"
     # shellcheck disable=SC2086
-    QEMU_GROUPS="$qemu_groups" \
-        "$DIR/tools/build-qemu.sh" "$prefix/qemu" "$SRC/qemu-$qemu_lock" "$SRC/qemu-vmvga" \
-        "$SRC/virglrenderer" "$DXVK_TARBALL" 2>&1 | tee "$log" | filter_output
+    build_run "$log" "qemu build" \
+        env QEMU_GROUPS="$qemu_groups" \
+        "$DIR/tools/build-qemu.sh" "$prefix/qemu" "$SRC/qemu-$qemu_lock" \
+        "$SRC/qemu-vmvga" "$SRC/virglrenderer" "$DXVK_TARBALL" || return 1
     note "qemu profile at $prefix/qemu"
 }
 
@@ -2392,12 +2387,12 @@ build_ovmf() {
     local edk2="$SRC/qemu-$qemu_lock/roms/edk2"
     section "firmware"
     [ -d "$edk2/OvmfPkg" ] || die "edk2 snapshot missing from the QEMU tarball"
-    export VMM_CFLAGS VMM_CXXFLAGS
-    export FILTER_THRESHOLD FILTER_PREFIX_LEN FILTER_ENABLED
+    export VMM_CFLAGS VMM_CXXFLAGS VMM_VERBOSE
     local log="$BUILD/logs/ovmf-build.log"
-    mkdir -p "$(dirname "$log")"
-    OVMF_GROUPS="$ovmf_groups" \
-        "$DIR/tools/build-ovmf.sh" "$edk2" "$BUILD/ovmf" 2>&1 | tee "$log" | filter_output || die "OVMF build failed"
+    build_run "$log" "OVMF build" \
+        env OVMF_GROUPS="$ovmf_groups" VMM_VERBOSE="$VERBOSE" \
+        "$DIR/tools/build-ovmf.sh" "$edk2" "$BUILD/ovmf" ||
+        die "OVMF build failed (see $log)"
 }
 
 # ------------------------------------------------------------------- launchers

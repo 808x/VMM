@@ -120,6 +120,11 @@ specified.
     --ovmf:bin=pull --deps:install --after:clean=none
 ```
 
+Build output is quiet by default: each phase writes its full log to
+`build/logs/` and the terminal only shows the phase notes. If a phase fails,
+its last 60 lines are printed. `--verbose` (or `VMM_VERBOSE=1`) streams the
+output instead and still keeps the log.
+
 Firmware comes from `share/firmware/OVMF` by default (`--ovmf:bin=pull`).
 `--ovmf:bin=compile` rebuilds it from the edk2 snapshot in the QEMU tarball
 with `tools/build-ovmf.sh` (adds a few minutes) and does not require a QEMU
