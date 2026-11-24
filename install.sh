@@ -247,7 +247,7 @@ ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 # *.patch and *.sh files and reading their VMM_* metadata comments.
 # Output lines: FLAG|NAME|DESC|DEPS|TICK   (TICK = yes means ticked by default)
 discover_patches() {
-    local engine="$1" dir="$DIR/patches/$engine" f
+    local engine="${1:-}" dir="$DIR/patches/$engine" f
     local flag name desc deps tick line
     for f in "$dir"/*.patch "$dir"/*.sh; do
         [ -e "$f" ] || continue
