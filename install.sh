@@ -1115,7 +1115,7 @@ menu_keys() {
 # Populates MENU_KEY_TO_FLAG[letter]="engine|flag" for the key handler.
 menu_render_patches() {
     local engine="$1" current="$2" opt="$3"
-    local patches count=0 idx=0 letter letters="BCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local patches count=0 idx=-1 letter letters="BCDEFGHIJKLMNOPQRSTUVWXYZ"
     local flag name desc deps sel
     patches=$(discover_patches "$engine")
     count=$(echo "$patches" | grep -c .)
@@ -1859,7 +1859,7 @@ menu_handle() {
                 a) menu_cycle_qemu ;;
                 b|c|d|e)
                     if [ "$qemu_bin" = compile ]; then
-                        entry="${MENU_KEY_TO_FLAG[$lk]}"
+                        entry="${MENU_KEY_TO_FLAG[$lk]:-}"
                         [ -n "$entry" ] && {
                             engine="${entry%%|*}"
                             flag="${entry#*|}"
@@ -1873,7 +1873,7 @@ menu_handle() {
                 a) menu_cycle_ovmf ;;
                 b|c)
                     if [ "$ovmf_bin" = compile ]; then
-                        entry="${MENU_KEY_TO_FLAG[$lk]}"
+                        entry="${MENU_KEY_TO_FLAG[$lk]:-}"
                         [ -n "$entry" ] && {
                             engine="${entry%%|*}"
                             flag="${entry#*|}"
@@ -1887,7 +1887,7 @@ menu_handle() {
                 a) menu_cycle_vm ;;
                 b|c|d|e)
                     if [ "$vm_bin" = compile ]; then
-                        entry="${MENU_KEY_TO_FLAG[$lk]}"
+                        entry="${MENU_KEY_TO_FLAG[$lk]:-}"
                         [ -n "$entry" ] && {
                             engine="${entry%%|*}"
                             flag="${entry#*|}"

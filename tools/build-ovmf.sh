@@ -73,7 +73,42 @@ has_group() {
 }
 
 note "patches: ${groups[*]}"
-"$DIR/tools/patch-ovmf.sh" "$SRC" "${groups[@]}"
+# Apply OVMF patches inline: *.patch via git apply, *.sh via direct execution.
+PATCH_DIR="$DIR/patches/ovmf"
+if [ ${#groups[@]} -gt 0 ]; then
+    for g in "${groups[@]}"; do
+        found=""
+        for f in "$PATCH_DIR"/*.patch "$PATCH_DIR"/*.sh; do
+            [ -e "$f" ] || continue
+            fflag=""
+            while IFS= read -r line; do
+                case "$line" in
+                    "# VMM_FLAG:"*) fflag="${line#*VMM_FLAG:}"; fflag="${fflag# }" ;;
+                esac
+            done < "$f"
+            [ "$fflag" = "$g" ] || continue
+            found="$f"
+            break
+        done
+        [ -n "$found" ] || { echo "build-ovmf: no patch file for flag $g" >&2; exit 1; }
+        case "$found" in
+            *.patch)
+                if ( cd "$SRC" && git apply --reverse --check "$found" ) >/dev/null 2>&1; then
+                    echo "ovmf/$g already applied"
+                else
+                    patch -p1 -d "$SRC" --forward < "$found" ||
+                        { echo "build-ovmf: failed to apply $found" >&2; exit 1; }
+                    echo "applied ovmf/$g"
+                fi
+                ;;
+            *.sh)
+                [ -x "$found" ] || { echo "build-ovmf: not executable: $found" >&2; exit 1; }
+                "$found" "$SRC"
+                ;;
+        esac
+        echo "applied ovmf/$g"
+    done
+fi
 
 note "BaseTools"
 # GCC 15+ defaults to C23: the bundled Pccts tools declare K&R-style

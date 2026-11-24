@@ -25,10 +25,68 @@ die() { echo "build-vm: $*" >&2; exit 1; }
 
 [ -d "$SRC" ] || die "missing virt-manager source: $SRC"
 
-# Apply virt-manager patches.
+# Apply virt-manager patches inline.
 if [ ${#PATCH_GROUPS[@]} -gt 0 ]; then
     note "vm patches: ${PATCH_GROUPS[*]}"
-    "$DIR/tools/patch-vmgr.sh" "$SRC" "${PATCH_GROUPS[@]}"
+    PATCH_DIR="$DIR/patches/virt-manager"
+    MODULES="$PATCH_DIR/modules"
+    # Resolve DEPS: auto-enable any dependency flags listed in patch metadata.
+    resolved=()
+    for g in "${PATCH_GROUPS[@]}"; do
+        [ -n "$g" ] || continue
+        resolved+=("$g")
+        for f in "$PATCH_DIR"/*.patch; do
+            [ -e "$f" ] || continue
+            fflag=""; fdeps="-"
+            while IFS= read -r line; do
+                case "$line" in
+                    "# VMM_FLAG:"*) fflag="${line#*VMM_FLAG:}"; fflag="${fflag# }" ;;
+                    "# VMM_DEPS:"*) fdeps="${line#*VMM_DEPS:}"; fdeps="${fdeps# }" ;;
+                esac
+            done < "$f"
+            [ "$fflag" = "$g" ] || continue
+            if [ "$fdeps" != "-" ]; then
+                oldifs="$IFS"; IFS=','
+                for d in $fdeps; do
+                    [ -n "$d" ] || continue
+                    case " ${resolved[*]} " in *" $d "*) ;; esac
+                    resolved+=("$d")
+                done
+                IFS="$oldifs"
+            fi
+        done
+    done
+    # Deduplicate while preserving order.
+    uniq=()
+    for g in "${resolved[@]}"; do
+        case " ${uniq[*]} " in *" $g "*) ;; *) uniq+=("$g") ;; esac
+    done
+    PATCH_GROUPS=("${uniq[@]}")
+
+    for g in "${PATCH_GROUPS[@]}"; do
+        found=""
+        for f in "$PATCH_DIR"/*.patch; do
+            [ -e "$f" ] || continue
+            fflag=""
+            while IFS= read -r line; do
+                case "$line" in
+                    "# VMM_FLAG:"*) fflag="${line#*VMM_FLAG:}"; fflag="${fflag# }" ;;
+                esac
+            done < "$f"
+            [ "$fflag" = "$g" ] || continue
+            found="$f"
+            break
+        done
+        [ -n "$found" ] || { echo "build-vm: no patch file for flag $g" >&2; exit 1; }
+        if grep -qx "$g" "$SRC/.vmm-groups" 2>/dev/null; then
+            echo "$g already applied"
+            continue
+        fi
+        ( cd "$SRC" && git apply --whitespace=nowarn "$found" ) ||
+            { echo "build-vm: failed to apply $found" >&2; exit 1; }
+        printf '%s\n' "$g" >> "$SRC/.vmm-groups"
+        echo "applied $g"
+    done
 fi
 
 # Meson setup (reuse existing build dir if possible).

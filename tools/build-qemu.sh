@@ -63,7 +63,95 @@ for g in $QEMU_GROUPS; do
     [ -n "$g" ] && qemu_group_args+=("$g")
 done
 IFS="$qemu_ifs"
-"$DIR/tools/patch-qemu.sh" "$QEMU_SRC" "$VMVGA_SRC" "${qemu_group_args[@]}"
+
+# Auto-select defaults from VMM_TICK metadata when no flags are given.
+if [ ${#qemu_group_args[@]} -eq 0 ]; then
+    PATCH_DIR="$DIR/patches/qemu"
+    for f in "$PATCH_DIR"/*.patch "$PATCH_DIR"/*.sh; do
+        [ -e "$f" ] || continue
+        flag=""; tick="no"
+        while IFS= read -r line; do
+            case "$line" in
+                "# VMM_FLAG:"*) flag="${line#*VMM_FLAG:}"; flag="${flag# }" ;;
+                "# VMM_TICK:"*) tick="${line#*VMM_TICK:}"; tick="${tick# }" ;;
+            esac
+        done < "$f"
+        [ "$tick" = "yes" ] && qemu_group_args+=("$flag")
+    done
+fi
+
+# Resolve DEPS: auto-enable any dependency flags listed in patch metadata.
+resolved=()
+for g in "${qemu_group_args[@]}"; do
+    [ -n "$g" ] || continue
+    resolved+=("$g")
+    PATCH_DIR="$DIR/patches/qemu"
+    for f in "$PATCH_DIR"/*.patch "$PATCH_DIR"/*.sh; do
+        [ -e "$f" ] || continue
+        fflag=""; fdeps="-"
+        while IFS= read -r line; do
+            case "$line" in
+                "# VMM_FLAG:"*) fflag="${line#*VMM_FLAG:}"; fflag="${fflag# }" ;;
+                "# VMM_DEPS:"*) fdeps="${line#*VMM_DEPS:}"; fdeps="${fdeps# }" ;;
+            esac
+        done < "$f"
+        [ "$fflag" = "$g" ] || continue
+        if [ "$fdeps" != "-" ]; then
+            oldifs="$IFS"; IFS=','
+            for d in $fdeps; do
+                [ -n "$d" ] || continue
+                case " ${resolved[*]} " in *" $d "*) ;; esac
+                resolved+=("$d")
+            done
+            IFS="$oldifs"
+        fi
+    done
+done
+
+# Deduplicate while preserving order.
+uniq=()
+for g in "${resolved[@]}"; do
+    case " ${uniq[*]} " in *" $g "*) ;; *) uniq+=("$g") ;; esac
+done
+qemu_group_args=("${uniq[@]}")
+
+# Apply patches inline: *.patch via git apply, *.sh via direct execution.
+if [ ${#qemu_group_args[@]} -gt 0 ]; then
+    note "qemu patches: ${qemu_group_args[*]}"
+    PATCH_DIR="$DIR/patches/qemu"
+    for g in "${qemu_group_args[@]}"; do
+        found=""
+        for f in "$PATCH_DIR"/*.patch "$PATCH_DIR"/*.sh; do
+            [ -e "$f" ] || continue
+            fflag=""
+            while IFS= read -r line; do
+                case "$line" in
+                    "# VMM_FLAG:"*) fflag="${line#*VMM_FLAG:}"; fflag="${fflag# }" ;;
+                esac
+            done < "$f"
+            [ "$fflag" = "$g" ] || continue
+            found="$f"
+            break
+        done
+        [ -n "$found" ] || { echo "build-qemu: no patch file for flag $g" >&2; exit 1; }
+        case "$found" in
+            *.patch)
+                if ( cd "$QEMU_SRC" && git apply --reverse --check "$found" ) >/dev/null 2>&1; then
+                    echo "qemu/$g already applied"
+                else
+                    ( cd "$QEMU_SRC" && git apply --whitespace=nowarn "$found" ) ||
+                        { echo "build-qemu: failed to apply $found" >&2; exit 1; }
+                    echo "applied qemu/$g"
+                fi
+                ;;
+            *.sh)
+                [ -x "$found" ] || { echo "build-qemu: not executable: $found" >&2; exit 1; }
+                "$found" "$QEMU_SRC" "$VMVGA_SRC"
+                ;;
+        esac
+        echo "applied qemu/$g"
+    done
+fi
 
 qemu_has_group() {
     local g
