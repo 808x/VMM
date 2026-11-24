@@ -157,29 +157,54 @@ fi
 export VMM_CFLAGS VMM_CXXFLAGS
 
 build_filter() {
-    # Terminal-side filter for build output. It keeps project notes,
-    # warnings/errors, dependency failures and throttled build progress, while
-    # hiding recipe echoes (edk2 GenFw/GenSec/cp/nasm lines), compiler caret
-    # excerpts, GenFds region chatter and meson YES lines. A running
-    # "lines hidden" counter keeps the terminal alive when a phase emits
-    # nothing but echoes. The full stream is in the log.
-    awk -v label="${1:-build}" '
+    # Terminal-side filter for build output. Visible lines (notes, warnings,
+    # errors, dependency failures) print normally. Recipe echoes, caret
+    # excerpts, GenFds chatter and meson YES probes are suppressed; ninja and
+    # edk2 progress lines only update one in-place status line:
+    # "[N lines suppressed] [1422/3185] Compiling ...". Without a terminal,
+    # progress and the hidden counter are printed sparsely instead. The full
+    # stream is in the log.
+    local tty=0 width
+    [ -t 1 ] && tty=1
+    width=$(tput cols 2>/dev/null || echo 100)
+    case "$width" in ''|*[!0-9]*) width=100 ;; esac
+    awk -v label="${1:-build}" -v tty="$tty" -v width="$width" '
     BEGIN {
         split("objcopy cp rm mv mkdir touch test GenFw GenSec GenFfs GenFv GenFds GenPage GenCrc32 GenVtf Trim nasm VfrCompile EfiLdrImage EfiRom TianoCompress LzmaCompress Split iasl AmlToC antlr dlg gcc cc g++ c++ ld ar gcc-ar clang clang++ cc1 collect2 make ninja python python3 cat install strip objdump readelf truncate ln chmod sed", a, " ")
         for (i in a) noisy[a[i]] = 1
         hidden = 0; steps = 0; mods = 0
         dcount = 0; dsig = ""
         ldn = 0; lton = 0
+        redefn = 0; redefline = ""
+        sup = 0; last = ""; status_shown = 0
+    }
+    function clear_status() {
+        if (tty && status_shown) { printf "\r\033[K"; fflush(); status_shown = 0 }
+    }
+    function show_status(   s) {
+        if (!tty) return
+        s = "[" sup " lines suppressed] " last
+        if (length(s) > width - 1) s = substr(s, 1, width - 1)
+        printf "\r\033[K%s", s
+        fflush()
+        status_shown = 1
+    }
+    function out(s) {
+        clear_status()
+        print s
+        fflush()
+        sup = 0; hidden = 0
     }
     function hide() {
-        hidden++
-        if (hidden >= 1000) {
+        hidden++; sup++
+        if (tty) show_status()
+        else if (hidden >= 1000) {
             printf "   [%s: %d lines hidden]\n", label, hidden
             hidden = 0
         }
     }
     function flush_hidden() {
-        if (hidden >= 40) printf "   [%s: %d lines hidden]\n", label, hidden
+        if (!tty && hidden >= 40) printf "   [%s: %d lines hidden]\n", label, hidden
         hidden = 0
     }
     function diag(s, key,   sig) {
@@ -195,11 +220,13 @@ build_filter() {
         if (dcount == 0) return
         flush_hidden()
         if (dcount <= 4) {
-            for (i = 1; i <= dcount; i++) print dbuf[i]
+            for (i = 1; i <= dcount; i++) out(dbuf[i])
         } else {
-            print dbuf[1]
+            out(dbuf[1])
+            clear_status()
             printf "   [%d similar lines]\n", dcount - 2
-            print dlast
+            fflush()
+            out(dlast)
         }
         dcount = 0
     }
@@ -207,13 +234,17 @@ build_filter() {
     /^[[:space:]]*\|[[:space:]]*[\^~]/ { hide(); next }
     /^(In file included from|[^ ]+: In (member function|function|instantiation|file included)|[^ ]+:[0-9]+: In (member function|function|instantiation|file included))/{ hide(); next }
     /^\[[0-9]+\/[0-9]+\]/ {
-        steps++
-        if (steps == 1 || steps % 10 == 0) { flush_diag(); print }
+        steps++; last = $0
+        if (tty) { show_status(); next }
+        if (steps == 1 || steps % 10 == 0) { flush_diag(); out($0) }
+        else hide()
         next
     }
     /^Building \.\.\./ {
-        mods++
-        if (mods == 1 || mods % 25 == 0) { flush_diag(); print }
+        mods++; last = $0
+        if (tty) { show_status(); next }
+        if (mods == 1 || mods % 25 == 0) { flush_diag(); out($0) }
+        else hide()
         next
     }
     /^[[:space:]]*(Region (Name|Size)|Generate Region)/ { hide(); next }
@@ -221,6 +252,9 @@ build_filter() {
     /^#+$/ { hide(); next }
     /^make(\[[0-9]+\])?: / { hide(); next }
     /^lto-wrapper: note:/ { hide(); next }
+    /: note: this is the location of the previous definition/ { hide(); next }
+    # dxvk: the same macro pair repeated across d3d8/d3d9 headers
+    /warning: ".*" redefined/ { redefn++; if (redefn == 1) redefline = $0; next }
     /^(Antlr parser generator|dlg  Version|Intel ACPI|ASL\+ Optimizing|ASL Input:|AML Output:|Copyright \(c\)|AmlToC )/ { hide(); next }
     # linker and lto chatter: one representative plus a total per phase
     /^(\/usr\/bin\/)?ld: .*warning:/ { ldn++; if (ldn == 1) ldline = $0; next }
@@ -241,8 +275,9 @@ build_filter() {
     /(error:|warning:|[Ee]rror [0-9]|FAILED|Failed to|fatal:|undefined reference|not found|Error )/ {
         diag($0); next
     }
-    { flush_diag(); print }
+    { flush_diag(); out($0) }
     END {
+        clear_status()
         flush_diag()
         if (ldn > 0) {
             print ldline
@@ -252,7 +287,12 @@ build_filter() {
             print ltoline
             if (lton > 1) printf "   [%d similar lto-wrapper warnings]\n", lton - 1
         }
+        if (redefn > 0) {
+            print redefline
+            if (redefn > 1) printf "   [%d similar macro redefinition warnings]\n", redefn - 1
+        }
         flush_hidden()
+        clear_status()
     }
     '
 }
