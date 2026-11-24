@@ -118,11 +118,24 @@ else
     c_reset=""
 fi
 
-# Build output. By default the full output of a build phase goes to
-# build/logs/<phase>.log and the terminal stays quiet; if the phase fails the
-# end of that log is printed. VMM_VERBOSE=1 or --verbose streams everything
-# and keeps a copy in the log.
-VERBOSE="${VMM_VERBOSE:-0}"
+# Build output. stream (default): the full log goes to build/logs/<phase>.log
+# and the terminal gets a filtered stream (phase notes, warnings, errors,
+# dependency failures, a progress line every 10 build steps, and a counter for
+# hidden recipe echoes). quiet: log only. verbose: no filtering. Select with
+# --verbose, --quiet or VMM_OUTPUT=stream|quiet|verbose.
+if [ -n "${VMM_OUTPUT:-}" ]; then
+    OUTPUT_MODE="$VMM_OUTPUT"
+elif [ "${VMM_VERBOSE:-0}" = 1 ]; then
+    OUTPUT_MODE=verbose
+elif [ "${VMM_QUIET:-0}" = 1 ]; then
+    OUTPUT_MODE=quiet
+else
+    OUTPUT_MODE=stream
+fi
+case "$OUTPUT_MODE" in
+    stream|quiet|verbose) ;;
+    *) OUTPUT_MODE=stream ;;
+esac
 
 # Compiler diagnostic flags (non-intrusive: affect output only, not codegen).
 # -Wno-error: warnings non-fatal
@@ -143,25 +156,139 @@ else
 fi
 export VMM_CFLAGS VMM_CXXFLAGS
 
+build_filter() {
+    # Terminal-side filter for build output. It keeps project notes,
+    # warnings/errors, dependency failures and throttled build progress, while
+    # hiding recipe echoes (edk2 GenFw/GenSec/cp/nasm lines), compiler caret
+    # excerpts, GenFds region chatter and meson YES lines. A running
+    # "lines hidden" counter keeps the terminal alive when a phase emits
+    # nothing but echoes. The full stream is in the log.
+    awk -v label="${1:-build}" '
+    BEGIN {
+        split("objcopy cp rm mv mkdir touch test GenFw GenSec GenFfs GenFv GenFds GenPage GenCrc32 GenVtf Trim nasm VfrCompile EfiLdrImage EfiRom TianoCompress LzmaCompress Split iasl AmlToC antlr dlg gcc cc g++ c++ ld ar gcc-ar clang clang++ cc1 collect2 make ninja python python3 cat install strip objdump readelf truncate ln chmod sed", a, " ")
+        for (i in a) noisy[a[i]] = 1
+        hidden = 0; steps = 0; mods = 0
+        dcount = 0; dsig = ""
+        ldn = 0; lton = 0
+    }
+    function hide() {
+        hidden++
+        if (hidden >= 1000) {
+            printf "   [%s: %d lines hidden]\n", label, hidden
+            hidden = 0
+        }
+    }
+    function flush_hidden() {
+        if (hidden >= 40) printf "   [%s: %d lines hidden]\n", label, hidden
+        hidden = 0
+    }
+    function diag(s, key,   sig) {
+        sig = (key != "") ? key : s
+        if (key == "") gsub(/[0-9]+/, "#", sig)
+        if (dcount > 0 && sig != dsig) flush_diag()
+        if (dcount == 0) { dsig = sig }
+        dcount++
+        if (dcount <= 4) dbuf[dcount] = s
+        dlast = s
+    }
+    function flush_diag(   i) {
+        if (dcount == 0) return
+        flush_hidden()
+        if (dcount <= 4) {
+            for (i = 1; i <= dcount; i++) print dbuf[i]
+        } else {
+            print dbuf[1]
+            printf "   [%d similar lines]\n", dcount - 2
+            print dlast
+        }
+        dcount = 0
+    }
+    /^[[:space:]]*[0-9]+ \|/ { hide(); next }
+    /^[[:space:]]*\|[[:space:]]*[\^~]/ { hide(); next }
+    /^(In file included from|[^ ]+: In (member function|function|instantiation|file included)|[^ ]+:[0-9]+: In (member function|function|instantiation|file included))/{ hide(); next }
+    /^\[[0-9]+\/[0-9]+\]/ {
+        steps++
+        if (steps == 1 || steps % 10 == 0) { flush_diag(); print }
+        next
+    }
+    /^Building \.\.\./ {
+        mods++
+        if (mods == 1 || mods % 25 == 0) { flush_diag(); print }
+        next
+    }
+    /^[[:space:]]*(Region (Name|Size)|Generate Region)/ { hide(); next }
+    /^(Generating|Fd) / { hide(); next }
+    /^#+$/ { hide(); next }
+    /^make(\[[0-9]+\])?: / { hide(); next }
+    /^lto-wrapper: note:/ { hide(); next }
+    /^(Antlr parser generator|dlg  Version|Intel ACPI|ASL\+ Optimizing|ASL Input:|AML Output:|Copyright \(c\)|AmlToC )/ { hide(); next }
+    # linker and lto chatter: one representative plus a total per phase
+    /^(\/usr\/bin\/)?ld: .*warning:/ { ldn++; if (ldn == 1) ldline = $0; next }
+    /^lto-wrapper: warning:/ { lton++; if (lton == 1) ltoline = $0; next }
+    # meson probes: keep failures, collapse the long tail of YES
+    /^(Checking for|Run-time dependency|Program |Compiler for |Library |Header |Found |Dependency )/ {
+        if ($0 ~ /(: NO|not found|NO$)/) { diag($0); next }
+        hide(); next
+    }
+    {
+        if ($0 ~ /^[[:space:]]*$/) next
+        cmd = $1
+        if (cmd ~ /=/) cmd = $2
+        gsub(/"/, "", cmd)
+        sub(/.*\//, "", cmd)
+        if (cmd in noisy) { hide(); next }
+    }
+    /(error:|warning:|[Ee]rror [0-9]|FAILED|Failed to|fatal:|undefined reference|not found|Error )/ {
+        diag($0); next
+    }
+    { flush_diag(); print }
+    END {
+        flush_diag()
+        if (ldn > 0) {
+            print ldline
+            if (ldn > 1) printf "   [%d similar linker warnings]\n", ldn - 1
+        }
+        if (lton > 0) {
+            print ltoline
+            if (lton > 1) printf "   [%d similar lto-wrapper warnings]\n", lton - 1
+        }
+        flush_hidden()
+    }
+    '
+}
+
 build_run() {
     # Usage: build_run LOG LABEL command [args...]
-    # Quiet: write everything to LOG, print nothing unless the command fails,
-    # in which case show the last 60 lines. Verbose: stream and keep a copy.
+    # The full output is always written to LOG. stream filters the terminal,
+    # quiet prints nothing, verbose passes everything through. A failed phase
+    # prints the last 60 log lines.
     local log="$1" label="$2"; shift 2
     local rc
     mkdir -p "$(dirname "$log")"
     : > "$log"
-    if [ "$VERBOSE" = 1 ]; then
-        "$@" 2>&1 | tee -a "$log"
-        rc=${PIPESTATUS[0]}
-    else
-        "$@" > "$log" 2>&1
-        rc=$?
-    fi
+    case "$OUTPUT_MODE" in
+        quiet)
+            "$@" > "$log" 2>&1
+            rc=$?
+            ;;
+        verbose)
+            "$@" 2>&1 | tee -a "$log"
+            rc=${PIPESTATUS[0]}
+            ;;
+        *)
+            "$@" 2>&1 | tee -a "$log" | build_filter "$label"
+            rc=${PIPESTATUS[0]}
+            ;;
+    esac
     if [ "$rc" -ne 0 ]; then
         printf '\n' >&2
-        warn "$label failed; last 60 lines of $log"
-        tail -n 60 "$log" >&2
+        warn "$label failed (log: $log)"
+        if grep -qiE 'error:|[Ee]rror [0-9]|FAILED|fatal|undefined reference|not found' "$log" 2>/dev/null; then
+            printf '%s\n' "--- errors from the log ---" >&2
+            grep -inE 'error:|[Ee]rror [0-9]|FAILED|fatal|undefined reference|not found' "$log" | tail -n 20 >&2
+        fi
+        printf '%s\n' "--- last 40 log lines ---" >&2
+        tail -n 40 "$log" >&2
     fi
     return "$rc"
 }
@@ -197,7 +324,8 @@ usage: ./install.sh [actions]
    --jobs=N                       parallel build jobs (default: nproc)
    --dxvk-tarball=FILE            use this dxvk-native tarball instead of building
    --dry-run                      resolve and report, change nothing
-   --verbose                      stream build output (default: log only)
+   --verbose                      show unfiltered build output
+   --quiet                        write build output to the log only
    -h, --help
 
  Patch groups: see --list-patches.  Patch values accept both the manifest
@@ -359,7 +487,8 @@ while [ $# -gt 0 ]; do
         --jobs=*) jobs="${1#*=}"; shift ;;
         --dxvk-tarball=*) dxvk_tarball="${1#*=}"; shift ;;
         --dry-run) dry_run=1; shift ;;
-        --verbose) VERBOSE=1; shift ;;
+        --verbose) OUTPUT_MODE=verbose; shift ;;
+        --quiet) OUTPUT_MODE=quiet; shift ;;
         *) die "unknown option '$1' (see --help)" ;;
     esac
 done
@@ -2387,10 +2516,10 @@ build_ovmf() {
     local edk2="$SRC/qemu-$qemu_lock/roms/edk2"
     section "firmware"
     [ -d "$edk2/OvmfPkg" ] || die "edk2 snapshot missing from the QEMU tarball"
-    export VMM_CFLAGS VMM_CXXFLAGS VMM_VERBOSE
+    export VMM_CFLAGS VMM_CXXFLAGS
     local log="$BUILD/logs/ovmf-build.log"
     build_run "$log" "OVMF build" \
-        env OVMF_GROUPS="$ovmf_groups" VMM_VERBOSE="$VERBOSE" \
+        env OVMF_GROUPS="$ovmf_groups" VMM_OUTPUT="$OUTPUT_MODE" \
         "$DIR/tools/build-ovmf.sh" "$edk2" "$BUILD/ovmf" ||
         die "OVMF build failed (see $log)"
 }

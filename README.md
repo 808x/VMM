@@ -120,10 +120,13 @@ specified.
     --ovmf:bin=pull --deps:install --after:clean=none
 ```
 
-Build output is quiet by default: each phase writes its full log to
-`build/logs/` and the terminal only shows the phase notes. If a phase fails,
-its last 60 lines are printed. `--verbose` (or `VMM_VERBOSE=1`) streams the
-output instead and still keeps the log.
+Build output streams through a filter by default: recipe echoes (nasm,
+GenFw, cp), compiler caret excerpts, GenFds region dumps and meson `YES`
+probes are collapsed, while phase notes, warnings, dependency `NO` results,
+ninja progress (every 10th step) and a hidden-line counter still appear. The
+complete log is kept in `build/logs/`. A failed phase prints its error lines
+and the last 40 log lines. `--quiet` writes the log only; `--verbose` streams
+raw output. `VMM_OUTPUT=stream|quiet|verbose` sets the same choice.
 
 Firmware comes from `share/firmware/OVMF` by default (`--ovmf:bin=pull`).
 `--ovmf:bin=compile` rebuilds it from the edk2 snapshot in the QEMU tarball
