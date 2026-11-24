@@ -64,7 +64,7 @@ for g in $QEMU_GROUPS; do
 done
 IFS="$qemu_ifs"
 [ ${#qemu_group_args[@]} -gt 0 ] || qemu_group_args=(none)
-"$DIR/tools/apply-qemu-patches.sh" "$QEMU_SRC" "$VMVGA_SRC" "${qemu_group_args[@]}"
+"$DIR/tools/patch-qemu.sh" "$QEMU_SRC" "$VMVGA_SRC" "${qemu_group_args[@]}"
 
 qemu_has_group() {
     local g

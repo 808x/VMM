@@ -1,14 +1,14 @@
 #!/bin/bash
 # Apply virt-manager groups to a source tree.
 #
-# usage: tools/apply-patches.sh TREE [GROUP...]
+# usage: tools/patch-vmgr.sh TREE [GROUP...]
 #
 # New modules live in patches/virt-manager/modules and are copied, so the
 # patch files stay insertion-only edits of upstream files.  install.sh uses
 # the same mapping.
 set -eu
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TREE="${1:?usage: apply-patches.sh TREE [GROUP...]}"
+TREE="${1:?usage: patch-vmgr.sh TREE [GROUP...]}"
 shift
 
 groups=("$@")
@@ -29,7 +29,7 @@ P="$DIR/patches/virt-manager"
 for g in pci-menu usb-cache usb-menu reparent; do
     has "$g" || continue
     patch=$(ls "$P"/*-"$g".patch 2>/dev/null) || {
-        echo "apply-patches: missing patch for $g" >&2
+        echo "patch-vmgr: missing patch for $g" >&2
         exit 1
     }
     case "$g" in

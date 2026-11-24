@@ -74,7 +74,7 @@ has_group() {
 }
 
 note "patches: ${groups[*]}"
-"$DIR/tools/apply-ovmf-patches.sh" "$SRC" "${groups[@]}"
+"$DIR/tools/patch-ovmf.sh" "$SRC" "${groups[@]}"
 
 note "BaseTools"
 # GCC 15+ defaults to C23: the bundled Pccts tools declare K&R-style

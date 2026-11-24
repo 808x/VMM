@@ -2306,87 +2306,14 @@ fetch_virgl() {
     fi
 }
 
-# ---------------------------------------------------------------- dxvk-native
-
-dxvk_build() {
-    local ver="${dxvk_lock#v}" out="$DL/dxvk-native-${dxvk_lock#v}.tar.gz" src="$SRC/dxvk"
-    if [ -n "$dxvk_tarball" ]; then
-        [ -f "$dxvk_tarball" ] || die "no such tarball: $dxvk_tarball"
-        DXVK_TARBALL="$dxvk_tarball"
-        return 0
-    fi
-    if [ -f "$out" ]; then
-        DXVK_TARBALL="$out"
-        return 0
-    fi
-    if [ ! -d "$src/.git" ]; then
-        note "clone dxvk-native $dxvk_lock"
-        git clone --quiet --depth 1 --branch "$dxvk_lock" \
-            --recurse-submodules --shallow-submodules \
-            "$(conf_get dxvk-native url)" "$src" || die "dxvk clone failed"
-    fi
-    note "build dxvk-native $dxvk_lock"
-    ( cd "$src" && ./package-native.sh "$ver" "$BUILD/dxvk-out" --64-only ) ||
-        die "dxvk-native build failed"
-    cp "$BUILD/dxvk-out/dxvk-native-$ver.tar.gz" "$out" || die "dxvk package missing"
-    rm -rf "$BUILD/dxvk-out"
-    DXVK_TARBALL="$out"
-}
-
-# ---------------------------------------------------------------------- builds
-
-build_vm() {
-    local src="$SRC/virt-manager-$vm_lock" bdir="$BUILD/vm-build"
-    [ -d "$src" ] || die "missing virt-manager source (fetch failed)"
-    tools_apply_vm
-    # A build dir configured from a previous directory name cannot be
-    # reused after the tree moves; recreate it instead of failing.
-    if [ -f "$bdir/build.ninja" ]; then
-        if ! meson setup --reconfigure "$bdir" "$src" \
-                --prefix="$prefix" --buildtype=release; then
-            note "stale virt-manager build dir; recreating"
-            rm -rf "$bdir"
-        fi
-    fi
-    if [ ! -f "$bdir/build.ninja" ]; then
-        CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
-        meson setup "$bdir" "$src" \
-            --prefix="$prefix" --buildtype=release || return 1
-    fi
-    local log="$BUILD/logs/virt-manager-build.log"
-    mkdir -p "$(dirname "$log")"
-    CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
-    ninja -C "$bdir" -j "$jobs" 2>&1 | tee "$log" | filter_output || return 1
-    ninja -C "$bdir" install 2>&1 | tee -a "$log" | filter_output || return 1
-    install_vm_modules
-    note "virt-manager installed to $prefix"
-}
-
-install_vm_modules() {
-    local dest="$prefix/share/virt-manager/virtManager"
-    local mods="$DIR/patches/virt-manager/modules"
-    [ -d "$dest" ] || die "virt-manager install tree missing: $dest"
-    for g in $(echo "$enable_vm" | tr ',' ' '); do
-        case "$g" in
-            pci-menu) install -m 0644 "$mods/pci_redirect.py" "$dest/" ;;
-            usb-cache|usb-menu) install -m 0644 "$mods/usb_redirect.py" "$dest/" ;;
-            reparent) install -m 0644 "$mods/gtk_embed.py" "$dest/details/" ;;
-        esac
-    done
-}
-
-tools_apply_vm() {
-    local groups
-    groups=$(echo "$enable_vm" | tr ',' ' ')
-    # shellcheck disable=SC2086
-    "$DIR/tools/apply-patches.sh" "$SRC/virt-manager-$vm_lock" $groups
-}
+# ---------------------------------------------------------------- builds
 
 build_qemu() {
     [ -d "$SRC/qemu-$qemu_lock" ] || die "missing qemu source"
-    dxvk_build
+    DXVK_TARBALL="$("$DIR/tools/build-dxvk.sh" "$SRC/dxvk" "$dxvk_lock" \
+        "$BUILD" "$DL/dxvk-native-${dxvk_lock#v}.tar.gz" \
+        "${DXVK_URL:-}")" || die "dxvk-native build failed"
     export VMM_CFLAGS VMM_CXXFLAGS
-    export FILTER_THRESHOLD FILTER_PREFIX_LEN FILTER_ENABLED
     local log="$BUILD/logs/qemu-build.log"
     mkdir -p "$(dirname "$log")"
     # shellcheck disable=SC2086
@@ -2401,7 +2328,6 @@ build_ovmf() {
     section "firmware"
     [ -d "$edk2/OvmfPkg" ] || die "edk2 snapshot missing from the QEMU tarball"
     export VMM_CFLAGS VMM_CXXFLAGS
-    export FILTER_THRESHOLD FILTER_PREFIX_LEN FILTER_ENABLED
     local log="$BUILD/logs/ovmf-build.log"
     mkdir -p "$(dirname "$log")"
     OVMF_GROUPS="$ovmf_groups" \
@@ -2919,7 +2845,16 @@ fi
 
 if [ "$vm_bin" = compile ]; then
     fetch_vm
-    build_vm || die "virt-manager build failed"
+    vm_groups_args=()
+    vm_ifs="$IFS"
+    IFS=','
+    for g in $enable_vm; do
+        [ -n "$g" ] && vm_groups_args+=("$g")
+    done
+    IFS="$vm_ifs"
+    "$DIR/tools/build-vm.sh" "$SRC/virt-manager-$vm_lock" "$BUILD/vm-build" \
+        "$prefix" "$jobs" "${vm_groups_args[@]}" ||
+        die "virt-manager build failed"
 fi
 
 # QEMU sources also carry roms/edk2, so OVMF compilation can run without a

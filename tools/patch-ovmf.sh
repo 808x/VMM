@@ -1,7 +1,7 @@
 #!/bin/bash
 # Apply the silent-boot changes to an edk2/OVMF source tree.
 #
-# usage: tools/apply-ovmf-patches.sh EDK2_SRC [GROUP...]
+# usage: tools/patch-ovmf.sh EDK2_SRC [GROUP...]
 #
 # Groups: logo (blank splash), bds (failure-only BdsDxe messages).
 # With no groups both are applied; pass "none" to apply nothing.
@@ -10,7 +10,7 @@
 # patch keeps the upstream CRLF line endings; the logo is blanked in place.
 set -eu
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TREE="${1:?usage: apply-ovmf-patches.sh EDK2_SRC [GROUP...]}"
+TREE="${1:?usage: patch-ovmf.sh EDK2_SRC [GROUP...]}"
 shift
 P="$DIR/patches/ovmf"
 STATUS="$TREE/OvmfPkg/Library/PlatformBmPrintScLib/StatusCodeHandler.c"
@@ -34,7 +34,7 @@ has() {
 
 if has bds; then
     [ -f "$STATUS" ] ||
-        { echo "apply-ovmf-patches: $STATUS not found" >&2; exit 1; }
+        { echo "patch-ovmf: $STATUS not found" >&2; exit 1; }
     if grep -q 'Value == mLoadPrep ? "loading"' "$STATUS"; then
         patch -p1 -d "$TREE" --forward < "$P/0001-failure-only.patch"
     else
@@ -44,16 +44,16 @@ fi
 
 if has logo; then
     [ -f "$LOGO" ] ||
-        { echo "apply-ovmf-patches: $LOGO not found" >&2; exit 1; }
+        { echo "patch-ovmf: $LOGO not found" >&2; exit 1; }
     size=$(stat -c %s "$LOGO")
     dib=$(od -An -tu4 -j14 -N4 "$LOGO" | tr -d '[:space:]')
     case "$dib" in
-        ''|*[!0-9]*) echo "apply-ovmf-patches: $LOGO has no BMP header" >&2
+        ''|*[!0-9]*) echo "patch-ovmf: $LOGO has no BMP header" >&2
                      exit 1 ;;
     esac
     start=$((14 + dib))
     if [ "$start" -lt 54 ] || [ "$start" -ge "$size" ]; then
-        echo "apply-ovmf-patches: $LOGO has an invalid pixel offset" >&2
+        echo "patch-ovmf: $LOGO has an invalid pixel offset" >&2
         exit 1
     fi
     # Zero the palette and pixel data while keeping the BMP headers.  Every

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Apply the QEMU series to a source tree.
 #
-# usage: tools/apply-qemu-patches.sh TREE [VMVGA_DIR] [GROUP...]
+# usage: tools/patch-qemu.sh TREE [VMVGA_DIR] [GROUP...]
 #
 # Groups: vmvga (source overlay), spice-virgl, resolution, gtk-egl.
 # With no groups all four are applied; pass "none" to apply nothing.
@@ -9,7 +9,7 @@
 # resolution also requires vmvga.
 set -eu
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TREE="${1:?usage: apply-qemu-patches.sh TREE [VMVGA_DIR] [GROUP...]}"
+TREE="${1:?usage: patch-qemu.sh TREE [VMVGA_DIR] [GROUP...]}"
 shift
 
 SRC="${1:-$DIR/src/qemu-vmvga}"
@@ -36,10 +36,10 @@ has() {
 
 if has vmvga; then
     [ -d "$SRC/hw" ] || {
-        echo "apply-qemu: vmvga source not found at $SRC" >&2
+        echo "patch-qemu: vmvga source not found at $SRC" >&2
         exit 1
     }
-    "$DIR/tools/apply-vmvga.sh" "$TREE" "$SRC"
+    "$DIR/tools/merge-qemu-vmvga.sh" "$TREE" "$SRC"
 fi
 
 for g in spice-virgl resolution gtk-egl; do
@@ -50,12 +50,12 @@ for g in spice-virgl resolution gtk-egl; do
         gtk-egl)     n=0003-gtk-egl.patch ;;
     esac
     p="$DIR/patches/qemu/$n"
-    [ -f "$p" ] || { echo "apply-qemu: missing $n" >&2; exit 1; }
+    [ -f "$p" ] || { echo "patch-qemu: missing $n" >&2; exit 1; }
     # The resolution patch edits the overlay's files.
     if [ "$g" = resolution ] && ! has vmvga && \
        [ -d "$DIR/src/qemu-vmvga/hw" ]; then
-        echo "apply-qemu: resolution needs the vmvga overlay; enabling it" >&2
-        "$DIR/tools/apply-vmvga.sh" "$TREE" "$SRC"
+        echo "patch-qemu: resolution needs the vmvga overlay; enabling it" >&2
+        "$DIR/tools/merge-qemu-vmvga.sh" "$TREE" "$SRC"
         groups+=(vmvga)
     fi
     # The vmvga overlay rewrites hw/ on every run, so a marker can be
