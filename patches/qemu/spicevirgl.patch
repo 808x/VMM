@@ -1,3 +1,8 @@
+# VMM_FLAG: spicevirgl
+# VMM_NAME: SPICE alongside a GL console
+# VMM_DESC: Keep SPICE channels usable while a GL console is active.
+# VMM_DEPS: -
+# VMM_TICK: yes
 --- a/ui/console.c
 +++ b/ui/console.c
 @@ -572,8 +572,12 @@

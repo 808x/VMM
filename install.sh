@@ -68,6 +68,8 @@ elif [ -d "$SELF_DIR/src/prefix" ]; then
 fi
 jobs="$(nproc 2>/dev/null || echo 4)"
 dxvk_tarball="${DXVK_NATIVE_TARBALL:-}"
+# Key→flag lookup for dynamic patch menus, rebuilt on each render.
+declare -A MENU_KEY_TO_FLAG
 
 menu_color=0
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
@@ -219,8 +221,9 @@ usage: ./install.sh [actions]
    --dry-run                      resolve and report, change nothing
    -h, --help
 
- Patch groups: see --list-patches.  Patch values accept both the manifest
- names (spice-virgl) and the compact menu names (spicevirgl).
+ Patch groups: see --list-patches.  Patch values are the flag names shown
+ in the TUI (spicevirgl, gtkegl, flexresize, vmvga, pcimenu, usbmenu,
+ usbcache, reparent, nosplash, nomessage).
 EOF
 }
 
@@ -240,60 +243,102 @@ conf_get() {
 
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 
-manifest_rows() {
-    grep -vE '^[[:space:]]*(#|$)' "$MANIFEST"
+# Discover all patches for an engine by scanning patches/<engine>/ for
+# *.patch and *.sh files and reading their VMM_* metadata comments.
+# Output lines: FLAG|NAME|DESC|DEPS|TICK   (TICK = yes means ticked by default)
+discover_patches() {
+    local engine="$1" dir="$DIR/patches/$engine" f
+    local flag name desc deps tick line
+    for f in "$dir"/*.patch "$dir"/*.sh; do
+        [ -e "$f" ] || continue
+        flag=""; name=""; desc=""; deps="-"; tick="no"
+        while IFS= read -r line; do
+            case "$line" in
+                "# VMM_FLAG:"*) flag="${line#*VMM_FLAG:}"; flag="${flag# }" ;;
+                "# VMM_NAME:"*) name="${line#*VMM_NAME:}"; name="${name# }" ;;
+                "# VMM_DESC:"*) desc="${line#*VMM_DESC:}"; desc="${desc# }" ;;
+                "# VMM_DEPS:"*) deps="${line#*VMM_DEPS:}"; deps="${deps# }" ;;
+                "# VMM_TICK:"*) tick="${line#*VMM_TICK:}"; tick="${tick# }" ;;
+            esac
+        done < "$f"
+        [ -n "$flag" ] || continue
+        printf '%s|%s|%s|%s|%s\n' "$flag" "$name" "$desc" "$deps" "$tick"
+    done | sort -t'|' -k1,1
+}
+
+# Return the comma-separated list of patches flagged VMM_TICK=yes for an engine.
+default_groups() {
+    discover_patches "$1" | awk -F'|' '$5=="yes" {print $1}' | paste -sd,
 }
 
 list_patches() {
-    printf '%-14s %-12s %-10s %-9s %s\n' ENGINE GROUP DEPENDS STATUS DESCRIPTION
-    manifest_rows | while IFS=$'\t' read -r eng name dep status desc; do
-        printf '%-14s %-12s %-10s %-9s %s\n' "$eng" "$name" "$dep" "$status" "$desc"
+    printf '%-14s %-12s %-10s %-9s %-6s %s\n' ENGINE FLAG DEPENDS TICK NAME DESCRIPTION
+    for engine in qemu virt-manager ovmf; do
+        discover_patches "$engine" | while IFS='|' read -r flag name desc deps tick; do
+            printf '%-14s %-12s %-10s %-9s %-6s %s\n' "$engine" "$flag" "$deps" "$tick" "$name" "$desc"
+        done
     done
 }
 
 groups_for() {
-    manifest_rows | awk -F'\t' -v e="$1" '$1==e && $4=="feature" {print $2}'
+    discover_patches "$1" | cut -d'|' -f1
+}
+
+# Resolve a flag to its metadata fields. Sets REPLY to "NAME|DESC|DEPS|TICK".
+patch_meta() {
+    local engine="$1" flag="$2"
+    REPLY=""
+    discover_patches "$engine" | while IFS='|' read -r f n d dp tk; do
+        if [ "$f" = "$flag" ]; then
+            printf '%s|%s|%s|%s' "$n" "$d" "$dp" "$tk"
+            return
+        fi
+    done > /tmp/opencode/patch_meta_$$
+    REPLY="$(cat /tmp/opencode/patch_meta_$$ 2>/dev/null)"
+    rm -f /tmp/opencode/patch_meta_$$
 }
 
 validate_selection() {
     local engine="$1" sel="$2"
-    local known
+    local known g dep d
     known=" $(groups_for "$engine" | tr '\n' ' ') "
-    local g dep d
     for g in $(echo "$sel" | tr ',' ' '); do
-        case "$known" in
+        [ -n "$g" ] || continue
+        case " $known " in
             *" $g "*) ;;
-            *) die "unknown $engine group '$g' (see --list-patches)" ;;
+            *) die "unknown $engine flag '$g' (see --list-patches)" ;;
         esac
     done
     for g in $(echo "$sel" | tr ',' ' '); do
-        dep=$(manifest_rows | awk -F'\t' -v e="$engine" -v n="$g" '$1==e && $2==n {print $3}')
-        [ "$dep" = "-" ] && continue
-        for d in $(echo "$dep" | tr ',' ' '); do
+        [ -n "$g" ] || continue
+        deps=$(discover_patches "$engine" | awk -F'|' -v g="$g" '$1==g {print $4}')
+        [ "$deps" = "-" ] && continue
+        oldifs="$IFS"
+        IFS=','
+        for d in $deps; do
+            [ -n "$d" ] || continue
             case " $(echo "$sel" | tr ',' ' ') " in
                 *" $d "*) ;;
                 *) die "$engine/$g requires $engine/$d" ;;
             esac
         done
+        IFS="$oldifs"
     done
 }
 
-# Map a menu/flag patch value to the manifest group name.
+# Map a --patch flag value to the canonical flag name (validates existence).
 map_group() {
-    case "$1:$2" in
-        qemu:vmvga) REPLY=vmvga ;;
-        qemu:spicevirgl|qemu:spice-virgl) REPLY=spice-virgl ;;
-        qemu:gtkegl|qemu:gtk-egl) REPLY=gtk-egl ;;
-        qemu:flexresize|qemu:resolution) REPLY=resolution ;;
-        virt-manager:reparent) REPLY=reparent ;;
-        virt-manager:pcimenu|virt-manager:pci-menu) REPLY=pci-menu ;;
-        virt-manager:usbmenu|virt-manager:usb-menu) REPLY=usb-menu ;;
-        virt-manager:usbcache|virt-manager:usb-cache) REPLY=usb-cache ;;
-        ovmf:logo|ovmf:nosplash) REPLY=logo ;;
-        ovmf:bds|ovmf:nomessage) REPLY=bds ;;
-        *:none|*:|"") REPLY="" ;;
-        *) die "unknown $1 patch group '$2' (see --list-patches)" ;;
-    esac
+    local engine="$1" flag="$2"
+    REPLY=""
+    discover_patches "$engine" | while IFS='|' read -r f n d dp; do
+        if [ "$f" = "$flag" ]; then
+            printf '%s' "$flag"
+            return
+        fi
+    done > /tmp/opencode/map_group_$$
+    REPLY="$(cat /tmp/opencode/map_group_$$ 2>/dev/null)"
+    rm -f /tmp/opencode/map_group_$$
+    [ -n "$REPLY" ] || die "unknown $engine patch flag '$flag' (see --list-patches)"
 }
 
 assign_groups() {
@@ -307,12 +352,6 @@ assign_groups() {
         out="${out:+$out,}$REPLY"
     done
     printf -v "$var" '%s' "$out"
-}
-
-default_groups() {
-    case "$1" in
-        qemu|virt-manager|ovmf) groups_for "$1" | paste -sd, ;;
-    esac
 }
 
 while [ $# -gt 0 ]; do
@@ -495,26 +534,30 @@ if [ "$dry_run" = 1 ]; then
     [ -n "$clean_mode" ] &&
         note "dry run: would clean $clean_mode after any build"
     case ",$qemu_groups," in
-        *,spice-virgl,*) [ -f "$DIR/patches/qemu/0001-spice-virgl.patch" ] ||
-            die "missing patches/qemu/0001-spice-virgl.patch" ;;
+        *,spicevirgl,*) [ -f "$DIR/patches/qemu/spicevirgl.patch" ] ||
+            die "missing patches/qemu/spicevirgl.patch" ;;
     esac
     case ",$qemu_groups," in
-        *,resolution,*) [ -f "$DIR/patches/qemu/0002-resolution.patch" ] ||
-            die "missing patches/qemu/0002-resolution.patch" ;;
+        *,flexresize,*) [ -f "$DIR/patches/qemu/flexresize.patch" ] ||
+            die "missing patches/qemu/flexresize.patch" ;;
     esac
     case ",$qemu_groups," in
-        *,gtk-egl,*) [ -f "$DIR/patches/qemu/0003-gtk-egl.patch" ] ||
-            die "missing patches/qemu/0003-gtk-egl.patch" ;;
+        *,gtkegl,*) [ -f "$DIR/patches/qemu/gtkegl.patch" ] ||
+            die "missing patches/qemu/gtkegl.patch" ;;
+    esac
+    case ",$qemu_groups," in
+        *,vmvga,*) [ -x "$DIR/patches/qemu/vmvga.sh" ] ||
+            die "missing patches/qemu/vmvga.sh" ;;
     esac
     for g in $(echo "$vm_groups" | tr ',' ' '); do
-        ls "$DIR"/patches/virt-manager/*-"$g".patch >/dev/null 2>&1 ||
+        [ -f "$DIR/patches/virt-manager/$g.patch" ] ||
             die "missing virt-manager patch for $g"
     done
     for g in $(echo "$ovmf_groups" | tr ',' ' '); do
         case "$g" in
-            logo) ;;  # blanked in place from the upstream edk2 image
-            bds) [ -f "$DIR/patches/ovmf/0001-failure-only.patch" ] ||
-                die "missing patches/ovmf/0001-failure-only.patch" ;;
+            nosplash) ;;  # blanked in place from the upstream edk2 image
+            nomessage) [ -f "$DIR/patches/ovmf/nomessage.patch" ] ||
+                die "missing patches/ovmf/nomessage.patch" ;;
         esac
     done
     [ -n "$qemu_file" ] || die "qemu lock_file missing (use --update)"
@@ -670,46 +713,11 @@ menu_order() {
     printf '%s' "$out"
 }
 
-menu_qemu_display() {
-    local out="" p
-    local IFS=,
-    for p in $1; do
-        case "$p" in
-            spice-virgl) p=spicevirgl ;;
-            gtk-egl) p=gtkegl ;;
-            resolution) p=flexresize ;;
-        esac
-        out="${out:+$out,}$p"
-    done
-    printf '%s' "$out"
-}
+menu_qemu_display() { printf '%s' "$1"; }
 
-menu_vm_display() {
-    local out="" p
-    local IFS=,
-    for p in $1; do
-        case "$p" in
-            pci-menu) p=pcimenu ;;
-            usb-menu) p=usbmenu ;;
-            usb-cache) p=usbcache ;;
-        esac
-        out="${out:+$out,}$p"
-    done
-    printf '%s' "$out"
-}
+menu_vm_display()   { printf '%s' "$1"; }
 
-menu_ovmf_display() {
-    local out="" p
-    local IFS=,
-    for p in $1; do
-        case "$p" in
-            logo) p=nosplash ;;
-            bds) p=nomessage ;;
-        esac
-        out="${out:+$out,}$p"
-    done
-    printf '%s' "$out"
-}
+menu_ovmf_display() { printf '%s' "$1"; }
 
 menu_short_path() {
     local p="$1" base dir
@@ -907,66 +915,68 @@ menu_pages() {
     fi
 }
 
-menu_toggle_qemu_group() {
-    case "$1" in
-        vmvga)
-            if menu_list_has "$qemu_groups" vmvga; then
-                qemu_groups=$(menu_list_del "$qemu_groups" vmvga)
-                qemu_groups=$(menu_list_del "$qemu_groups" resolution)
-            else
-                qemu_groups=$(menu_list_add "$qemu_groups" vmvga)
-            fi ;;
-        resolution)
-            if menu_list_has "$qemu_groups" resolution; then
-                qemu_groups=$(menu_list_del "$qemu_groups" resolution)
-            else
-                qemu_groups=$(menu_list_add "$qemu_groups" resolution)
-                qemu_groups=$(menu_list_add "$qemu_groups" vmvga)
-            fi ;;
-        spice-virgl|gtk-egl)
-            if menu_list_has "$qemu_groups" "$1"; then
-                qemu_groups=$(menu_list_del "$qemu_groups" "$1")
-            else
-                qemu_groups=$(menu_list_add "$qemu_groups" "$1")
-            fi ;;
+menu_toggle_patch_group() {
+    local engine="$1" flag="$2"
+    local current groups_var
+    case "$engine" in
+        qemu)       current="$qemu_groups" ;;
+        virt-manager) current="$vm_groups" ;;
+        ovmf)       current="$ovmf_groups" ;;
+        *) return ;;
     esac
-    qemu_groups=$(menu_order "$qemu_groups" vmvga spice-virgl gtk-egl resolution)
-}
 
-menu_toggle_vm_group() {
-    case "$1" in
-        usb-menu)
-            if menu_list_has "$vm_groups" usb-menu; then
-                vm_groups=$(menu_list_del "$vm_groups" usb-menu)
-            else
-                vm_groups=$(menu_list_add "$vm_groups" usb-menu)
-                vm_groups=$(menu_list_add "$vm_groups" usb-cache)
-            fi ;;
-        usb-cache)
-            if menu_list_has "$vm_groups" usb-cache; then
-                vm_groups=$(menu_list_del "$vm_groups" usb-cache)
-                vm_groups=$(menu_list_del "$vm_groups" usb-menu)
-            else
-                vm_groups=$(menu_list_add "$vm_groups" usb-cache)
-            fi ;;
-        reparent|pci-menu)
-            if menu_list_has "$vm_groups" "$1"; then
-                vm_groups=$(menu_list_del "$vm_groups" "$1")
-            else
-                vm_groups=$(menu_list_add "$vm_groups" "$1")
-            fi ;;
-    esac
-    vm_groups=$(menu_order "$vm_groups" reparent pci-menu usb-menu usb-cache)
-}
-
-menu_toggle_ovmf_group() {
-    if menu_list_has "$ovmf_groups" "$1"; then
-        ovmf_groups=$(menu_list_del "$ovmf_groups" "$1")
+    if menu_list_has "$current" "$flag"; then
+        # Disabling: drop this flag and anything that lists it in DEPS
+        local newgroups="" g deps oldifs drop=0
+        for g in $(echo "$current" | tr ',' ' '); do
+            [ -n "$g" ] || continue
+            [ "$g" = "$flag" ] && continue
+            deps=$(discover_patches "$engine" | awk -F'|' -v n="$g" '$1==n {print $4}')
+            if [ "$deps" != "-" ]; then
+                oldifs="$IFS"; IFS=','; drop=0
+                for d in $deps; do
+                    [ -n "$d" ] || continue
+                    if [ "$d" = "$flag" ]; then drop=1; break; fi
+                done
+                IFS="$oldifs"
+                [ "$drop" = 1 ] && continue
+            fi
+            newgroups="${newgroups:+$newgroups,}$g"
+        done
+        case "$engine" in
+            qemu) qemu_groups="$newgroups" ;;
+            virt-manager) vm_groups="$newgroups" ;;
+            ovmf) ovmf_groups="$newgroups" ;;
+        esac
     else
-        ovmf_groups=$(menu_list_add "$ovmf_groups" "$1")
+        # Enabling: add this flag and all its DEPS
+        local addlist="$flag" deps oldifs d
+        deps=$(discover_patches "$engine" | awk -F'|' -v f="$flag" '$1==f {print $4}')
+        if [ "$deps" != "-" ]; then
+            oldifs="$IFS"; IFS=','
+            for d in $deps; do
+                [ -n "$d" ] || continue
+                addlist="$addlist,$d"
+            done
+            IFS="$oldifs"
+        fi
+        local combined="${current:+$current,}$addlist"
+        local deduped="" g
+        for g in $(echo "$combined" | tr ',' ' '); do
+            [ -n "$g" ] || continue
+            case " $deduped " in *" $g "*) ;; *) deduped="${deduped:+$deduped,}$g" ;; esac
+        done
+        case "$engine" in
+            qemu) qemu_groups="$deduped" ;;
+            virt-manager) vm_groups="$deduped" ;;
+            ovmf) ovmf_groups="$deduped" ;;
+        esac
     fi
-    ovmf_groups=$(menu_order "$ovmf_groups" logo bds)
 }
+
+menu_toggle_qemu_group()    { menu_toggle_patch_group qemu    "$1"; }
+menu_toggle_vm_group()      { menu_toggle_patch_group virt-manager "$1"; }
+menu_toggle_ovmf_group()    { menu_toggle_patch_group ovmf    "$1"; }
 
 menu_count() {
     [ -n "$1" ] || { printf '0'; return; }
@@ -984,19 +994,23 @@ menu_status_item() {
 }
 
 menu_status_values() {
+    local q_total o_total v_total
+    q_total=$(discover_patches qemu | grep -c .)
+    o_total=$(discover_patches ovmf | grep -c .)
+    v_total=$(discover_patches virt-manager | grep -c .)
     case "$qemu_bin" in
-        compile) MENU_Q="compile ($(menu_count "$qemu_groups")/4)" ;;
+        compile) MENU_Q="compile ($(menu_count "$qemu_groups")/$q_total)" ;;
         link) MENU_Q=link ;;
         *) MENU_Q=skip ;;
     esac
     case "$ovmf_bin" in
-        compile) MENU_O="compile ($(menu_count "$ovmf_groups")/2)" ;;
+        compile) MENU_O="compile ($(menu_count "$ovmf_groups")/$o_total)" ;;
         link) MENU_O=link ;;
         pull) MENU_O=bundled ;;
         *) MENU_O=skip ;;
     esac
     case "$vm_bin" in
-        compile) MENU_V="compile ($(menu_count "$vm_groups")/4)" ;;
+        compile) MENU_V="compile ($(menu_count "$vm_groups")/$v_total)" ;;
         link) MENU_V=link ;;
         *) MENU_V=skip ;;
     esac
@@ -1012,18 +1026,18 @@ menu_status() {
     if [ "$compact" = 1 ]; then
         sep=' | '
         case "$qemu_bin" in
-            compile) q="c$(menu_count "$qemu_groups")/4" ;;
+            compile) q="c$(menu_count "$qemu_groups")/$(discover_patches qemu | grep -c .)" ;;
             link) q=link ;;
             *) q=skip ;;
         esac
         case "$ovmf_bin" in
-            compile) o="c$(menu_count "$ovmf_groups")/2" ;;
+            compile) o="c$(menu_count "$ovmf_groups")/$(discover_patches ovmf | grep -c .)" ;;
             link) o=link ;;
             pull) o=bundled ;;
             *) o=skip ;;
         esac
         case "$vm_bin" in
-            compile) v="c$(menu_count "$vm_groups")/4" ;;
+            compile) v="c$(menu_count "$vm_groups")/$(discover_patches virt-manager | grep -c .)" ;;
             link) v=link ;;
             *) v=skip ;;
         esac
@@ -1096,6 +1110,29 @@ menu_keys() {
     printf '\n'
 }
 
+# Render a dynamic patch subsection for an engine.
+# Reads patch metadata from patches/<engine>/ via discover_patches.
+# Populates MENU_KEY_TO_FLAG[letter]="engine|flag" for the key handler.
+menu_render_patches() {
+    local engine="$1" current="$2" opt="$3"
+    local patches count=0 idx=0 letter letters="BCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local flag name desc deps sel
+    patches=$(discover_patches "$engine")
+    count=$(echo "$patches" | grep -c .)
+    [ "$count" -gt 0 ] || return 0
+    menu_subsection "Patches ($(menu_count "$current")/$count)" "$opt"
+    MENU_KEY_TO_FLAG=()
+    while IFS='|' read -r flag name desc deps tick; do
+        [ -n "$flag" ] || continue
+        idx=$((idx + 1))
+        letter="${letters:$idx:1}"
+        MENU_KEY_TO_FLAG["$letter"]="${engine}|${flag}"
+        sel=0; menu_list_has "$current" "$flag" && sel=1
+        menu_row "[${letter}]" "$name" "$flag" "$(menu_check_mark "$sel")" "$sel"
+        menu_note "$sel" "$desc"
+    done <<< "$patches"
+}
+
 menu_render_qemu() {
     local sel
     menu_section "BUILD ITEMS | QEMU"
@@ -1124,19 +1161,7 @@ menu_render_qemu() {
     menu_note "$sel" "Install no QEMU; the launcher falls back to PATH."
 
     if [ "$qemu_bin" = compile ]; then
-        menu_subsection "Patches ($(menu_count "$qemu_groups")/4)" "--qemu:patch"
-        sel=0; menu_list_has "$qemu_groups" vmvga && sel=1
-        menu_row '[B]' "VMware SVGA 3D support" vmvga "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "vmvga overlay for host-driven 3D in guests."
-        sel=0; menu_list_has "$qemu_groups" spice-virgl && sel=1
-        menu_row '[C]' "SPICE alongside a GL console" spicevirgl "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Keep SPICE channels usable while a GL console is active."
-        sel=0; menu_list_has "$qemu_groups" gtk-egl && sel=1
-        menu_row '[D]' "Re-blit and hidden-window guard" gtkegl "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Fix stale frames after window swaps and focus changes."
-        sel=0; menu_list_has "$qemu_groups" resolution && sel=1
-        menu_row '[E]' "Host-driven guest resolution" flexresize "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Resize the guest display from the host over vmport."
+        menu_render_patches qemu "$qemu_groups" --qemu:patch
     fi
 }
 
@@ -1178,13 +1203,7 @@ menu_render_ovmf() {
     menu_note "$sel" "Leave firmware handling to the host or domain XML."
 
     if [ "$ovmf_bin" = compile ]; then
-        menu_subsection "Patches ($(menu_count "$ovmf_groups")/2)" "--ovmf:patch"
-        sel=0; menu_list_has "$ovmf_groups" logo && sel=1
-        menu_row '[B]' "Blank TianoCore splash" nosplash "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Replace the logo with a blank 193x58 image."
-        sel=0; menu_list_has "$ovmf_groups" bds && sel=1
-        menu_row '[C]' "Failure-only BdsDxe messages" nomessage "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Print boot messages only when something fails."
+        menu_render_patches ovmf "$ovmf_groups" --ovmf:patch
     fi
 }
 
@@ -1216,19 +1235,7 @@ menu_render_vm() {
     menu_note "$sel" "Install no virt-manager; use the host application instead."
 
     if [ "$vm_bin" = compile ]; then
-        menu_subsection "Patches ($(menu_count "$vm_groups")/4)" "--virtmgr:patch"
-        sel=0; menu_list_has "$vm_groups" reparent && sel=1
-        menu_row '[B]' "X11/XWayland reparenting" reparent "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Embed the QEMU GTK window inside the virt-manager console."
-        sel=0; menu_list_has "$vm_groups" pci-menu && sel=1
-        menu_row '[C]' "PCIe hotplug submenu" pcimenu "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Curated PCI redirect submenu and device picker."
-        sel=0; menu_list_has "$vm_groups" usb-menu && sel=1
-        menu_row '[D]' "USB hotplug submenu" usbmenu "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "USB redirect submenu; pulls in the device cache."
-        sel=0; menu_list_has "$vm_groups" usb-cache && sel=1
-        menu_row '[E]' "USB device cache" usbcache "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "Work around the spice-gtk GI ownership bug."
+        menu_render_patches virt-manager "$vm_groups" --virtmgr:patch
     fi
 }
 
@@ -1850,24 +1857,44 @@ menu_handle() {
         1)
             case "$lk" in
                 a) menu_cycle_qemu ;;
-                b) [ "$qemu_bin" = compile ] && menu_toggle_qemu_group vmvga ;;
-                c) [ "$qemu_bin" = compile ] && menu_toggle_qemu_group spice-virgl ;;
-                d) [ "$qemu_bin" = compile ] && menu_toggle_qemu_group gtk-egl ;;
-                e) [ "$qemu_bin" = compile ] && menu_toggle_qemu_group resolution ;;
+                b|c|d|e)
+                    if [ "$qemu_bin" = compile ]; then
+                        entry="${MENU_KEY_TO_FLAG[$lk]}"
+                        [ -n "$entry" ] && {
+                            engine="${entry%%|*}"
+                            flag="${entry#*|}"
+                            [ "$engine" = qemu ] && menu_toggle_qemu_group "$flag"
+                        }
+                    fi
+                    ;;
             esac ;;
         2)
             case "$lk" in
                 a) menu_cycle_ovmf ;;
-                b) [ "$ovmf_bin" = compile ] && menu_toggle_ovmf_group logo ;;
-                c) [ "$ovmf_bin" = compile ] && menu_toggle_ovmf_group bds ;;
+                b|c)
+                    if [ "$ovmf_bin" = compile ]; then
+                        entry="${MENU_KEY_TO_FLAG[$lk]}"
+                        [ -n "$entry" ] && {
+                            engine="${entry%%|*}"
+                            flag="${entry#*|}"
+                            [ "$engine" = ovmf ] && menu_toggle_ovmf_group "$flag"
+                        }
+                    fi
+                    ;;
             esac ;;
         3)
             case "$lk" in
                 a) menu_cycle_vm ;;
-                b) [ "$vm_bin" = compile ] && menu_toggle_vm_group reparent ;;
-                c) [ "$vm_bin" = compile ] && menu_toggle_vm_group pci-menu ;;
-                d) [ "$vm_bin" = compile ] && menu_toggle_vm_group usb-menu ;;
-                e) [ "$vm_bin" = compile ] && menu_toggle_vm_group usb-cache ;;
+                b|c|d|e)
+                    if [ "$vm_bin" = compile ]; then
+                        entry="${MENU_KEY_TO_FLAG[$lk]}"
+                        [ -n "$entry" ] && {
+                            engine="${entry%%|*}"
+                            flag="${entry#*|}"
+                            [ "$engine" = virt-manager ] && menu_toggle_vm_group "$flag"
+                        }
+                    fi
+                    ;;
             esac ;;
         4)
             case "$lk" in
@@ -1919,9 +1946,9 @@ menu_prepare() {
         vm_groups=$(default_groups virt-manager)
     [ "$ovmf_bin" = compile ] && [ "$ovmf_groups_given" = 0 ] &&
         ovmf_groups=$(default_groups ovmf)
-    qemu_groups=$(menu_order "$qemu_groups" vmvga spice-virgl gtk-egl resolution)
-    vm_groups=$(menu_order "$vm_groups" reparent pci-menu usb-menu usb-cache)
-    ovmf_groups=$(menu_order "$ovmf_groups" logo bds)
+    qemu_groups=$(menu_order "$qemu_groups" vmvga spicevirgl gtkegl flexresize)
+    vm_groups=$(menu_order "$vm_groups" reparent pcimenu usbmenu usbcache)
+    ovmf_groups=$(menu_order "$ovmf_groups" nosplash nomessage)
     [ -n "$qemu_link" ] ||
         qemu_link=$(command -v qemu-system-x86_64 2>/dev/null || true)
     [ -n "$vm_link" ] ||

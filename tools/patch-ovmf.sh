@@ -1,24 +1,51 @@
 #!/bin/bash
-# Apply the silent-boot changes to an edk2/OVMF source tree.
+# Apply silent-boot changes to an edk2/OVMF source tree.
 #
-# usage: tools/patch-ovmf.sh EDK2_SRC [GROUP...]
+# usage: tools/patch-ovmf.sh EDK2_SRC [FLAG...]
 #
-# Groups: logo (blank splash), bds (failure-only BdsDxe messages).
-# With no groups both are applied; pass "none" to apply nothing.
-#
-# Idempotent: safe to run on an already patched tree.  The status-code
-# patch keeps the upstream CRLF line endings; the logo is blanked in place.
+# Flags: nosplash, nomessage
+# With no flags all patches flagged VMM_TICK=yes are applied;
+# pass "none" to apply nothing.
+# Each patches/ovmf/*.patch or *.sh file carries VMM_FLAG/VMM_NAME/
+# VMM_DESC/VMM_DEPS metadata comments at the top.
 set -eu
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TREE="${1:?usage: patch-ovmf.sh EDK2_SRC [GROUP...]}"
+PATCH_DIR="$DIR/patches/ovmf"
+TREE="${1:?usage: patch-ovmf.sh EDK2_SRC [FLAG...]}"
 shift
-P="$DIR/patches/ovmf"
-STATUS="$TREE/OvmfPkg/Library/PlatformBmPrintScLib/StatusCodeHandler.c"
-LOGO="$TREE/MdeModulePkg/Logo/Logo.bmp"
+
+# Discover available patches by scanning for *.patch and *.sh files
+# and reading their VMM_* metadata comments.
+declare -A PFLAG PNAME PDESC PDEPS PFILE PTICK
+for f in "$PATCH_DIR"/*.patch "$PATCH_DIR"/*.sh; do
+    [ -e "$f" ] || continue
+    flag=""; name=""; desc=""; deps="-"; ftype="patch"; tick="no"
+    case "$f" in *.sh) ftype="script" ;; esac
+    while IFS= read -r line; do
+        case "$line" in
+            "# VMM_FLAG:"*) flag="${line#*VMM_FLAG:}"; flag="${flag# }" ;;
+            "# VMM_NAME:"*) name="${line#*VMM_NAME:}"; name="${name# }" ;;
+            "# VMM_DESC:"*) desc="${line#*VMM_DESC:}"; desc="${desc# }" ;;
+            "# VMM_DEPS:"*) deps="${line#*VMM_DEPS:}"; deps="${deps# }" ;;
+            "# VMM_TICK:"*) tick="${line#*VMM_TICK:}"; tick="${tick# }" ;;
+        esac
+    done < "$f"
+    [ -n "$flag" ] || continue
+    PFLAG[$flag]=1
+    PNAME[$flag]="$name"
+    PDESC[$flag]="$desc"
+    PDEPS[$flag]="$deps"
+    PTYPE[$flag]="$ftype"
+    PTICK[$flag]="$tick"
+    PFILE[$flag]="$f"
+done
 
 groups=("$@")
 if [ ${#groups[@]} -eq 0 ]; then
-    groups=(logo bds)
+    # Auto-select patches flagged VMM_TICK=yes
+    for g in "${!PFLAG[@]}"; do
+        [ "${PTICK[$g]}" = "yes" ] && groups+=("$g")
+    done
 fi
 
 has() {
@@ -32,34 +59,21 @@ has() {
     return 1
 }
 
-if has bds; then
-    [ -f "$STATUS" ] ||
-        { echo "patch-ovmf: $STATUS not found" >&2; exit 1; }
+STATUS="$TREE/OvmfPkg/Library/PlatformBmPrintScLib/StatusCodeHandler.c"
+LOGO="$TREE/MdeModulePkg/Logo/Logo.bmp"
+
+if has nomessage; then
+    [ -f "$P/nomessage.patch" ] ||
+        { echo "patch-ovmf: missing patches/ovmf/nomessage.patch" >&2; exit 1; }
     if grep -q 'Value == mLoadPrep ? "loading"' "$STATUS"; then
-        patch -p1 -d "$TREE" --forward < "$P/0001-failure-only.patch"
+        patch -p1 -d "$TREE" --forward < "$P/nomessage.patch"
     else
         echo "ovmf status patch already applied"
     fi
 fi
 
-if has logo; then
-    [ -f "$LOGO" ] ||
-        { echo "patch-ovmf: $LOGO not found" >&2; exit 1; }
-    size=$(stat -c %s "$LOGO")
-    dib=$(od -An -tu4 -j14 -N4 "$LOGO" | tr -d '[:space:]')
-    case "$dib" in
-        ''|*[!0-9]*) echo "patch-ovmf: $LOGO has no BMP header" >&2
-                     exit 1 ;;
-    esac
-    start=$((14 + dib))
-    if [ "$start" -lt 54 ] || [ "$start" -ge "$size" ]; then
-        echo "patch-ovmf: $LOGO has an invalid pixel offset" >&2
-        exit 1
-    fi
-    # Zero the palette and pixel data while keeping the BMP headers.  Every
-    # index then maps to black, so the TianoCore splash is blank regardless
-    # of the upstream image or palette.
-    truncate -s "$start" "$LOGO"
-    truncate -s "$size" "$LOGO"
-    echo "ovmf logo blanked in place"
+if has nosplash; then
+    [ -x "$P/nosplash.sh" ] ||
+        { echo "patch-ovmf: missing patches/ovmf/nosplash.sh" >&2; exit 1; }
+    "$P/nosplash.sh" "$TREE"
 fi

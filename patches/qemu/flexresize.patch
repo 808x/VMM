@@ -1,3 +1,8 @@
+# VMM_FLAG: flexresize
+# VMM_NAME: Host-driven guest resolution
+# VMM_DESC: Resize the guest display from the host over vmport.
+# VMM_DEPS: vmvga
+# VMM_TICK: yes
 --- a/hw/display/vmware_vga.c
 +++ b/hw/display/vmware_vga.c
 @@ -442,6 +442,11 @@

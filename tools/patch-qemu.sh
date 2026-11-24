@@ -1,26 +1,55 @@
 #!/bin/bash
-# Apply the QEMU series to a source tree.
+# Apply QEMU patches and overlays to a source tree.
 #
-# usage: tools/patch-qemu.sh TREE [VMVGA_DIR] [GROUP...]
+# usage: tools/patch-qemu.sh TREE [VMVGA_SRC] [FLAG...]
 #
-# Groups: vmvga (source overlay), spice-virgl, resolution, gtk-egl.
-# With no groups all four are applied; pass "none" to apply nothing.
-# The resolution patch edits files the vmvga overlay provides, so selecting
-# resolution also requires vmvga.
+# Flags: vmvga, spicevirgl, gtkegl, flexresize
+# With no flags all present are applied; pass "none" to apply nothing.
+# Each patches/qemu/*.patch or *.sh file carries VMM_FLAG/VMM_NAME/
+# VMM_DESC/VMM_DEPS metadata comments at the top.
 set -eu
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TREE="${1:?usage: patch-qemu.sh TREE [VMVGA_DIR] [GROUP...]}"
+PATCH_DIR="$DIR/patches/qemu"
+TREE="${1:?usage: patch-qemu.sh TREE [VMVGA_SRC] [FLAG...]}"
 shift
-
-SRC="${1:-$DIR/src/qemu-vmvga}"
-case "$SRC" in
-    -*|"") SRC="$DIR/src/qemu-vmvga" ;;
+VMVGA_SRC="${1:-$DIR/src/qemu-vmvga}"
+case "$VMVGA_SRC" in
+    -*|"") VMVGA_SRC="$DIR/src/qemu-vmvga" ;;
     *) shift ;;
 esac
 
+# Discover available patches by scanning the directory for .patch/.sh
+# files and reading their VMM_* metadata comments.
+declare -A PFLAG PNAME PDESC PDEPS PTYPE PFILE PTICK
+for f in "$PATCH_DIR"/*.patch "$PATCH_DIR"/*.sh; do
+    [ -e "$f" ] || continue
+    flag=""; name=""; desc=""; deps="-"; ftype="patch"; tick="no"
+    case "$f" in *.sh) ftype="script" ;; esac
+    while IFS= read -r line; do
+        case "$line" in
+            "# VMM_FLAG:"*) flag="${line#*VMM_FLAG:}"; flag="${flag# }" ;;
+            "# VMM_NAME:"*) name="${line#*VMM_NAME:}"; name="${name# }" ;;
+            "# VMM_DESC:"*) desc="${line#*VMM_DESC:}"; desc="${desc# }" ;;
+            "# VMM_DEPS:"*) deps="${line#*VMM_DEPS:}"; deps="${deps# }" ;;
+            "# VMM_TICK:"*) tick="${line#*VMM_TICK:}"; tick="${tick# }" ;;
+        esac
+    done < "$f"
+    [ -n "$flag" ] || continue
+    PFLAG[$flag]=1
+    PNAME[$flag]="$name"
+    PDESC[$flag]="$desc"
+    PDEPS[$flag]="$deps"
+    PTYPE[$flag]="$ftype"
+    PTICK[$flag]="$tick"
+    PFILE[$flag]="$f"
+done
+
 groups=("$@")
 if [ ${#groups[@]} -eq 0 ]; then
-    groups=(vmvga spice-virgl resolution gtk-egl)
+    # Auto-select patches flagged VMM_TICK=yes
+    for g in "${!PFLAG[@]}"; do
+        [ "${PTICK[$g]}" = "yes" ] && groups+=("$g")
+    done
 fi
 
 has() {
@@ -34,42 +63,46 @@ has() {
     return 1
 }
 
-if has vmvga; then
-    [ -d "$SRC/hw" ] || {
-        echo "patch-qemu: vmvga source not found at $SRC" >&2
-        exit 1
-    }
-    "$DIR/tools/merge-qemu-vmvga.sh" "$TREE" "$SRC"
-fi
+# Resolve DEPS: auto-enable any listed dependency flags.
+resolved=()
+for g in "${groups[@]}"; do
+    [ -n "${PFLAG[$g]:-}" ] || { echo "patch-qemu: unknown flag '$g'" >&2; exit 1; }
+    resolved+=("$g")
+    if [ "${PDEPS[$g]:--}" != "-" ]; then
+        oldifs="$IFS"
+        IFS=','
+        for d in ${PDEPS[$g]}; do
+            [ -n "$d" ] || continue
+            case " ${resolved[*]} " in *" $d "*) ;; esac
+            resolved+=("$d")
+        done
+        IFS="$oldifs"
+    fi
+done
 
-for g in spice-virgl resolution gtk-egl; do
-    has "$g" || continue
-    case "$g" in
-        spice-virgl) n=0001-spice-virgl.patch ;;
-        resolution)  n=0002-resolution.patch ;;
-        gtk-egl)     n=0003-gtk-egl.patch ;;
+# Deduplicate while preserving order.
+uniq=()
+for g in "${resolved[@]}"; do
+    case " ${uniq[*]} " in *" $g "*) ;; *) uniq+=("$g") ;; esac
+done
+groups=("${uniq[@]}")
+
+for g in "${groups[@]}"; do
+    case "${PTYPE[$g]}" in
+        script)
+            f="${PFILE[$g]}"
+            [ -x "$f" ] || { echo "patch-qemu: not executable: $f" >&2; exit 1; }
+            "$f" "$TREE" "$VMVGA_SRC"
+            ;;
+        patch)
+            f="${PFILE[$g]}"
+            [ -f "$f" ] || { echo "patch-qemu: missing patch for $g: $f" >&2; exit 1; }
+            if ( cd "$TREE" && git apply --reverse --check "$f" ) >/dev/null 2>&1; then
+                echo "qemu/$g already applied"
+            else
+                ( cd "$TREE" && git apply --whitespace=nowarn "$f" )
+                echo "applied qemu/$g"
+            fi
+            ;;
     esac
-    p="$DIR/patches/qemu/$n"
-    [ -f "$p" ] || { echo "patch-qemu: missing $n" >&2; exit 1; }
-    # The resolution patch edits the overlay's files.
-    if [ "$g" = resolution ] && ! has vmvga && \
-       [ -d "$DIR/src/qemu-vmvga/hw" ]; then
-        echo "patch-qemu: resolution needs the vmvga overlay; enabling it" >&2
-        "$DIR/tools/merge-qemu-vmvga.sh" "$TREE" "$SRC"
-        groups+=(vmvga)
-    fi
-    # The vmvga overlay rewrites hw/ on every run, so a marker can be
-    # stale even though the group was applied earlier.  Trust the tree,
-    # not the marker: a patch that reverses cleanly is already present.
-    if ( cd "$TREE" && git apply --reverse --check "$DIR/patches/qemu/$n" ) >/dev/null 2>&1; then
-        echo "qemu/$g already applied"
-        grep -qx "$g" "$TREE/.vmm-groups-qemu" 2>/dev/null ||
-            printf '%s\n' "$g" >> "$TREE/.vmm-groups-qemu"
-        continue
-    fi
-    ( cd "$TREE" && git apply --whitespace=nowarn "$DIR/patches/qemu/$n" )
-    if ! grep -qx "$g" "$TREE/.vmm-groups-qemu" 2>/dev/null; then
-        printf '%s\n' "$g" >> "$TREE/.vmm-groups-qemu"
-    fi
-    echo "applied qemu/$g"
 done

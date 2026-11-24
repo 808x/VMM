@@ -55,7 +55,7 @@ export LDFLAGS="-L$VIRGL_PREFIX/lib/x86_64-linux-gnu -L$VIRGL_PREFIX/lib ${LDFLA
 export CPPFLAGS="-I$VIRGL_PREFIX/include ${CPPFLAGS:-}"
 
 note "qemu patches"
-QEMU_GROUPS="${QEMU_GROUPS:-vmvga,spice-virgl,resolution,gtk-egl}"
+QEMU_GROUPS="${QEMU_GROUPS:-}"
 qemu_group_args=()
 qemu_ifs="$IFS"
 IFS=,
@@ -63,7 +63,6 @@ for g in $QEMU_GROUPS; do
     [ -n "$g" ] && qemu_group_args+=("$g")
 done
 IFS="$qemu_ifs"
-[ ${#qemu_group_args[@]} -gt 0 ] || qemu_group_args=(none)
 "$DIR/tools/patch-qemu.sh" "$QEMU_SRC" "$VMVGA_SRC" "${qemu_group_args[@]}"
 
 qemu_has_group() {

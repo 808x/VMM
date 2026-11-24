@@ -1,3 +1,8 @@
+# VMM_FLAG: nomessage
+# VMM_NAME: Failure-only BdsDxe messages
+# VMM_DESC: Print boot messages only when something fails.
+# VMM_DEPS: -
+# VMM_TICK: yes
 --- a/OvmfPkg/Library/PlatformBmPrintScLib/StatusCodeHandler.c	2026-11-21 22:01:55.101285517 +0530
 +++ b/OvmfPkg/Library/PlatformBmPrintScLib/StatusCodeHandler.c	2026-11-21 22:01:55.121284829 +0530
 @@ -204,16 +204,7 @@

@@ -55,7 +55,7 @@ done
 note() { echo "-- $*"; }
 die() { echo "build-ovmf: $*" >&2; exit 1; }
 
-OVMF_GROUPS="${OVMF_GROUPS:-logo,bds}"
+OVMF_GROUPS="${OVMF_GROUPS:-}"
 groups=()
 local_ifs="$IFS"
 IFS=,
@@ -63,7 +63,6 @@ for g in $OVMF_GROUPS; do
     [ -n "$g" ] && groups+=("$g")
 done
 IFS="$local_ifs"
-[ ${#groups[@]} -gt 0 ] || groups=(none)
 
 has_group() {
     local g

@@ -1,3 +1,8 @@
+# VMM_FLAG: usb-menu
+# VMM_NAME: USB hotplug submenu
+# VMM_DESC: USB redirect submenu; pulls in the device cache.
+# VMM_DEPS: usb-cache
+# VMM_TICK: yes
 --- a/virtManager/vmmenu.py
 +++ b/virtManager/vmmenu.py
 @@ -10,6 +10,8 @@
