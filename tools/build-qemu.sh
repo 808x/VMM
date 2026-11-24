@@ -28,8 +28,8 @@ mkdir -p "$BUILD" "$VIRGL_PREFIX" "$PREFIX"
 # Strip unsupported diagnostic flags that older GCC doesn't recognize.
 VMM_CFLAGS="${VMM_CFLAGS:-}"
 VMM_CXXFLAGS="${VMM_CXXFLAGS:-}"
-VMM_CFLAGS=$(echo "$VMM_CFLAGS" | sed 's/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
-VMM_CXXFLAGS=$(echo "$VMM_CXXFLAGS" | sed 's/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
+VMM_CFLAGS=$(echo "$VMM_CFLAGS" | sed 's/-fno-diagnostics-show-caret//g; s/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
+VMM_CXXFLAGS=$(echo "$VMM_CXXFLAGS" | sed 's/-fno-diagnostics-show-caret//g; s/-fno-diagnostics-show-source-lines//g; s/-fno-diagnostics-show-event-links//g')
 
 note() { echo "-- $*"; }
 

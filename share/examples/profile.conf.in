@@ -35,7 +35,7 @@ vm_cachyos() {
     OVMF_VARS="$PREFIX/firmware/OVMF/OVMF_VARS_4M.fd"
     OVMF_NVRAM="$NVRAM_DIR/CachyOS_VARS.fd"
     EMULATOR="$PREFIX/bin/vmm-qemu"
-    DISK="../../../../Virtualization/VHD/CachyOS.qcow2"
+    #DISK="../VHD/CachyOS.qcow2"
     CURRENTMEM="$CURRENTMEM_VM1"
     MAXIMUMMEM="$MAXIMUM_MEM"
 }
@@ -48,7 +48,7 @@ vm_windows() {
     OVMF_VARS="$PREFIX/firmware/OVMF/OVMF_VARS_4M.ms.fd"
     OVMF_NVRAM="$NVRAM_DIR/Windows_VARS.fd"
     EMULATOR="$PREFIX/bin/vmm-qemu"
-    DISK="/media/nulltype/Datadisk/Virtualization/VHD/Windows 11.qcow2"
+    #DISK="../VHD/Windows 11.qcow2"
     CURRENTMEM="$CURRENTMEM_VM2"
     MAXIMUMMEM="$MAXIMUM_MEM"
 }

@@ -58,6 +58,14 @@ clean_given=0
 misc_given=0
 no_clean=0
 prefix="$ROOT/prefix"
+# If a prefix already lives next to the installer, run from inside it; if the
+# tree was copied (no symlinks) the prefix may instead be under src/.  All path
+# variables above are absolute, so this chdir is safe.
+if [ -d "$SELF_DIR/prefix" ]; then
+    cd "$SELF_DIR/prefix"
+elif [ -d "$SELF_DIR/src/prefix" ]; then
+    cd "$SELF_DIR/src/prefix"
+fi
 jobs="$(nproc 2>/dev/null || echo 4)"
 dxvk_tarball="${DXVK_NATIVE_TARBALL:-}"
 
@@ -118,32 +126,18 @@ else
     c_reset=""
 fi
 
-# Build output. stream (default): the full log goes to build/logs/<phase>.log
-# and the terminal gets a filtered stream (phase notes, warnings, errors,
-# dependency failures, a progress line every 10 build steps, and a counter for
-# hidden recipe echoes). quiet: log only. verbose: no filtering. Select with
-# --verbose, --quiet or VMM_OUTPUT=stream|quiet|verbose.
-if [ -n "${VMM_OUTPUT:-}" ]; then
-    OUTPUT_MODE="$VMM_OUTPUT"
-elif [ "${VMM_VERBOSE:-0}" = 1 ]; then
-    OUTPUT_MODE=verbose
-elif [ "${VMM_QUIET:-0}" = 1 ]; then
-    OUTPUT_MODE=quiet
-else
-    OUTPUT_MODE=stream
-fi
-case "$OUTPUT_MODE" in
-    stream|quiet|verbose) ;;
-    *) OUTPUT_MODE=stream ;;
-esac
+# Build output filtering: collapse repetitive lines sharing the same prefix.
+# Threshold = consecutive lines before collapsing (default 4).
+# Prefix length = characters to compare (default 12).
+FILTER_THRESHOLD="${VMM_FILTER_THRESHOLD:-4}"
+FILTER_PREFIX_LEN="${VMM_FILTER_PREFIX_LEN:-12}"
+FILTER_ENABLED="${VMM_FILTER_ENABLED:-1}"
 
 # Compiler diagnostic flags (non-intrusive: affect output only, not codegen).
 # -Wno-error: warnings non-fatal
 # -Wno-macro-redefined: silence D3D8/D3D9 macro collisions (DXVK)
-# -fno-diagnostics-show-caret / -fno-diagnostics-show-line-numbers: drop the
-#   "^~~~~~" source excerpts and line gutters from warnings.
 # Override via VMM_CFLAGS/VMM_CXXFLAGS env vars (e.g. "" to use project defaults).
-VMM_DIAG_FLAGS="-Wno-error -Wno-macro-redefined -fno-diagnostics-show-caret -fno-diagnostics-show-line-numbers"
+VMM_DIAG_FLAGS="-Wno-error -Wno-macro-redefined"
 if [ -n "${VMM_CFLAGS+x}" ] && [ -n "$VMM_CFLAGS" ]; then
     VMM_CFLAGS="$VMM_CFLAGS $VMM_DIAG_FLAGS"
 else
@@ -156,181 +150,40 @@ else
 fi
 export VMM_CFLAGS VMM_CXXFLAGS
 
-build_filter() {
-    # Terminal-side filter for build output. Visible lines (notes, warnings,
-    # errors, dependency failures) print normally. Recipe echoes, caret
-    # excerpts, GenFds chatter and meson YES probes are suppressed; ninja and
-    # edk2 progress lines only update one in-place status line:
-    # "[N lines suppressed] [1422/3185] Compiling ...". Without a terminal,
-    # progress and the hidden counter are printed sparsely instead. The full
-    # stream is in the log.
-    local tty=0 width
-    [ -t 1 ] && tty=1
-    width=$(tput cols 2>/dev/null || echo 100)
-    case "$width" in ''|*[!0-9]*) width=100 ;; esac
-    awk -v label="${1:-build}" -v tty="$tty" -v width="$width" '
-    BEGIN {
-        split("objcopy cp rm mv mkdir touch test GenFw GenSec GenFfs GenFv GenFds GenPage GenCrc32 GenVtf Trim nasm VfrCompile EfiLdrImage EfiRom TianoCompress LzmaCompress Split iasl AmlToC antlr dlg gcc cc g++ c++ ld ar gcc-ar clang clang++ cc1 collect2 make ninja python python3 cat install strip objdump readelf truncate ln chmod sed", a, " ")
-        for (i in a) noisy[a[i]] = 1
-        hidden = 0; steps = 0; mods = 0
-        dcount = 0; dsig = ""
-        ldn = 0; lton = 0
-        redefn = 0; redefline = ""
-        sup = 0; last = ""; status_shown = 0
-    }
-    function clear_status() {
-        if (tty && status_shown) { printf "\r\033[K"; fflush(); status_shown = 0 }
-    }
-    function show_status(   s) {
-        if (!tty) return
-        s = "[" sup " lines suppressed] " last
-        if (length(s) > width - 1) s = substr(s, 1, width - 1)
-        printf "\r\033[K%s", s
-        fflush()
-        status_shown = 1
-    }
-    function out(s) {
-        clear_status()
-        print s
-        fflush()
-        sup = 0; hidden = 0
-    }
-    function hide() {
-        hidden++; sup++
-        if (tty) show_status()
-        else if (hidden >= 1000) {
-            printf "   [%s: %d lines hidden]\n", label, hidden
-            hidden = 0
-        }
-    }
-    function flush_hidden() {
-        if (!tty && hidden >= 40) printf "   [%s: %d lines hidden]\n", label, hidden
-        hidden = 0
-    }
-    function diag(s, key,   sig) {
-        sig = (key != "") ? key : s
-        if (key == "") gsub(/[0-9]+/, "#", sig)
-        if (dcount > 0 && sig != dsig) flush_diag()
-        if (dcount == 0) { dsig = sig }
-        dcount++
-        if (dcount <= 4) dbuf[dcount] = s
-        dlast = s
-    }
-    function flush_diag(   i) {
-        if (dcount == 0) return
-        flush_hidden()
-        if (dcount <= 4) {
-            for (i = 1; i <= dcount; i++) out(dbuf[i])
-        } else {
-            out(dbuf[1])
-            clear_status()
-            printf "   [%d similar lines]\n", dcount - 2
-            fflush()
-            out(dlast)
-        }
-        dcount = 0
-    }
-    /^[[:space:]]*[0-9]+ \|/ { hide(); next }
-    /^[[:space:]]*\|[[:space:]]*[\^~]/ { hide(); next }
-    /^(In file included from|[^ ]+: In (member function|function|instantiation|file included)|[^ ]+:[0-9]+: In (member function|function|instantiation|file included))/{ hide(); next }
-    /^\[[0-9]+\/[0-9]+\]/ {
-        steps++; last = $0
-        if (tty) { show_status(); next }
-        if (steps == 1 || steps % 10 == 0) { flush_diag(); out($0) }
-        else hide()
-        next
-    }
-    /^Building \.\.\./ {
-        mods++; last = $0
-        if (tty) { show_status(); next }
-        if (mods == 1 || mods % 25 == 0) { flush_diag(); out($0) }
-        else hide()
-        next
-    }
-    /^[[:space:]]*(Region (Name|Size)|Generate Region)/ { hide(); next }
-    /^(Generating|Fd) / { hide(); next }
-    /^#+$/ { hide(); next }
-    /^make(\[[0-9]+\])?: / { hide(); next }
-    /^lto-wrapper: note:/ { hide(); next }
-    /: note: this is the location of the previous definition/ { hide(); next }
-    # dxvk: the same macro pair repeated across d3d8/d3d9 headers
-    /warning: ".*" redefined/ { redefn++; if (redefn == 1) redefline = $0; next }
-    /^(Antlr parser generator|dlg  Version|Intel ACPI|ASL\+ Optimizing|ASL Input:|AML Output:|Copyright \(c\)|AmlToC )/ { hide(); next }
-    # linker and lto chatter: one representative plus a total per phase
-    /^(\/usr\/bin\/)?ld: .*warning:/ { ldn++; if (ldn == 1) ldline = $0; next }
-    /^lto-wrapper: warning:/ { lton++; if (lton == 1) ltoline = $0; next }
-    # meson probes: keep failures, collapse the long tail of YES
-    /^(Checking for|Run-time dependency|Program |Compiler for |Library |Header |Found |Dependency )/ {
-        if ($0 ~ /(: NO|not found|NO$)/) { diag($0); next }
-        hide(); next
-    }
-    {
-        if ($0 ~ /^[[:space:]]*$/) next
-        cmd = $1
-        if (cmd ~ /=/) cmd = $2
-        gsub(/"/, "", cmd)
-        sub(/.*\//, "", cmd)
-        if (cmd in noisy) { hide(); next }
-    }
-    /(error:|warning:|[Ee]rror [0-9]|FAILED|Failed to|fatal:|undefined reference|not found|Error )/ {
-        diag($0); next
-    }
-    { flush_diag(); out($0) }
-    END {
-        clear_status()
-        flush_diag()
-        if (ldn > 0) {
-            print ldline
-            if (ldn > 1) printf "   [%d similar linker warnings]\n", ldn - 1
-        }
-        if (lton > 0) {
-            print ltoline
-            if (lton > 1) printf "   [%d similar lto-wrapper warnings]\n", lton - 1
-        }
-        if (redefn > 0) {
-            print redefline
-            if (redefn > 1) printf "   [%d similar macro redefinition warnings]\n", redefn - 1
-        }
-        flush_hidden()
-        clear_status()
-    }
-    '
-}
+filter_output() {
+    # Usage: command | filter_output
+    # Collapses consecutive lines sharing the same leading prefix.
+    # Output format: first_line \n [... N collapsed] last_line
+    local threshold="${FILTER_THRESHOLD:-4}"
+    local prefix_len="${FILTER_PREFIX_LEN:-12}"
+    local enabled="${FILTER_ENABLED:-1}"
+    [ "$enabled" = 1 ] || { cat; return; }
 
-build_run() {
-    # Usage: build_run LOG LABEL command [args...]
-    # The full output is always written to LOG. stream filters the terminal,
-    # quiet prints nothing, verbose passes everything through. A failed phase
-    # prints the last 60 log lines.
-    local log="$1" label="$2"; shift 2
-    local rc
-    mkdir -p "$(dirname "$log")"
-    : > "$log"
-    case "$OUTPUT_MODE" in
-        quiet)
-            "$@" > "$log" 2>&1
-            rc=$?
-            ;;
-        verbose)
-            "$@" 2>&1 | tee -a "$log"
-            rc=${PIPESTATUS[0]}
-            ;;
-        *)
-            "$@" 2>&1 | tee -a "$log" | build_filter "$label"
-            rc=${PIPESTATUS[0]}
-            ;;
-    esac
-    if [ "$rc" -ne 0 ]; then
-        printf '\n' >&2
-        warn "$label failed (log: $log)"
-        if grep -qiE 'error:|[Ee]rror [0-9]|FAILED|fatal|undefined reference|not found' "$log" 2>/dev/null; then
-            printf '%s\n' "--- errors from the log ---" >&2
-            grep -inE 'error:|[Ee]rror [0-9]|FAILED|fatal|undefined reference|not found' "$log" | tail -n 20 >&2
+    local line prefix count=0 last_prefix="" group=()
+    while IFS= read -r line; do
+        prefix="${line:0:prefix_len}"
+        if [ "$prefix" = "$last_prefix" ] && [ -n "$prefix" ]; then
+            count=$((count + 1))
+            group+=("$line")
+            continue
+        else
+            if [ "$count" -ge "$threshold" ] && [ ${#group[@]} -gt 0 ]; then
+                echo "${group[0]}"
+                echo "[... $((count - 1)) collapsed] ${group[-1]}"
+            elif [ "$count" -gt 0 ]; then
+                printf '%s\n' "${group[@]}"
+            fi
+            count=1
+            last_prefix="$prefix"
+            group=("$line")
         fi
-        printf '%s\n' "--- last 40 log lines ---" >&2
-        tail -n 40 "$log" >&2
+    done
+    if [ "$count" -ge "$threshold" ] && [ ${#group[@]} -gt 0 ]; then
+        echo "${group[0]}"
+        echo "[... $((count - 1)) collapsed] ${group[-1]}"
+    elif [ "$count" -gt 0 ]; then
+        printf '%s\n' "${group[@]}"
     fi
-    return "$rc"
 }
 
 usage() {
@@ -364,8 +217,6 @@ usage: ./install.sh [actions]
    --jobs=N                       parallel build jobs (default: nproc)
    --dxvk-tarball=FILE            use this dxvk-native tarball instead of building
    --dry-run                      resolve and report, change nothing
-   --verbose                      show unfiltered build output
-   --quiet                        write build output to the log only
    -h, --help
 
  Patch groups: see --list-patches.  Patch values accept both the manifest
@@ -527,8 +378,6 @@ while [ $# -gt 0 ]; do
         --jobs=*) jobs="${1#*=}"; shift ;;
         --dxvk-tarball=*) dxvk_tarball="${1#*=}"; shift ;;
         --dry-run) dry_run=1; shift ;;
-        --verbose) OUTPUT_MODE=verbose; shift ;;
-        --quiet) OUTPUT_MODE=quiet; shift ;;
         *) die "unknown option '$1' (see --help)" ;;
     esac
 done
@@ -2477,11 +2326,8 @@ dxvk_build() {
             "$(conf_get dxvk-native url)" "$src" || die "dxvk clone failed"
     fi
     note "build dxvk-native $dxvk_lock"
-    _dxvk_package() {
-        ( cd "$src" && ./package-native.sh "$ver" "$BUILD/dxvk-out" --64-only )
-    }
-    build_run "$BUILD/logs/dxvk-native-build.log" "dxvk-native build" \
-        _dxvk_package || die "dxvk-native build failed"
+    ( cd "$src" && ./package-native.sh "$ver" "$BUILD/dxvk-out" --64-only ) ||
+        die "dxvk-native build failed"
     cp "$BUILD/dxvk-out/dxvk-native-$ver.tar.gz" "$out" || die "dxvk package missing"
     rm -rf "$BUILD/dxvk-out"
     DXVK_TARBALL="$out"
@@ -2496,25 +2342,22 @@ build_vm() {
     # A build dir configured from a previous directory name cannot be
     # reused after the tree moves; recreate it instead of failing.
     if [ -f "$bdir/build.ninja" ]; then
-        if ! build_run "$BUILD/logs/virt-manager-setup.log" \
-                "virt-manager reconfigure" \
-                env CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
-                meson setup --reconfigure "$bdir" "$src" \
+        if ! meson setup --reconfigure "$bdir" "$src" \
                 --prefix="$prefix" --buildtype=release; then
             note "stale virt-manager build dir; recreating"
             rm -rf "$bdir"
         fi
     fi
     if [ ! -f "$bdir/build.ninja" ]; then
-        build_run "$BUILD/logs/virt-manager-setup.log" "virt-manager configure" \
-            env CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
-            meson setup "$bdir" "$src" \
+        CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
+        meson setup "$bdir" "$src" \
             --prefix="$prefix" --buildtype=release || return 1
     fi
-    build_run "$BUILD/logs/virt-manager-build.log" "virt-manager build" \
-        ninja -C "$bdir" -j "$jobs" || return 1
-    build_run "$BUILD/logs/virt-manager-install.log" "virt-manager install" \
-        ninja -C "$bdir" install || return 1
+    local log="$BUILD/logs/virt-manager-build.log"
+    mkdir -p "$(dirname "$log")"
+    CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
+    ninja -C "$bdir" -j "$jobs" 2>&1 | tee "$log" | filter_output || return 1
+    ninja -C "$bdir" install 2>&1 | tee -a "$log" | filter_output || return 1
     install_vm_modules
     note "virt-manager installed to $prefix"
 }
@@ -2543,12 +2386,13 @@ build_qemu() {
     [ -d "$SRC/qemu-$qemu_lock" ] || die "missing qemu source"
     dxvk_build
     export VMM_CFLAGS VMM_CXXFLAGS
+    export FILTER_THRESHOLD FILTER_PREFIX_LEN FILTER_ENABLED
     local log="$BUILD/logs/qemu-build.log"
+    mkdir -p "$(dirname "$log")"
     # shellcheck disable=SC2086
-    build_run "$log" "qemu build" \
-        env QEMU_GROUPS="$qemu_groups" \
-        "$DIR/tools/build-qemu.sh" "$prefix/qemu" "$SRC/qemu-$qemu_lock" \
-        "$SRC/qemu-vmvga" "$SRC/virglrenderer" "$DXVK_TARBALL" || return 1
+    QEMU_GROUPS="$qemu_groups" \
+        "$DIR/tools/build-qemu.sh" "$prefix/qemu" "$SRC/qemu-$qemu_lock" "$SRC/qemu-vmvga" \
+        "$SRC/virglrenderer" "$DXVK_TARBALL" 2>&1 | tee "$log" | filter_output
     note "qemu profile at $prefix/qemu"
 }
 
@@ -2557,11 +2401,11 @@ build_ovmf() {
     section "firmware"
     [ -d "$edk2/OvmfPkg" ] || die "edk2 snapshot missing from the QEMU tarball"
     export VMM_CFLAGS VMM_CXXFLAGS
+    export FILTER_THRESHOLD FILTER_PREFIX_LEN FILTER_ENABLED
     local log="$BUILD/logs/ovmf-build.log"
-    build_run "$log" "OVMF build" \
-        env OVMF_GROUPS="$ovmf_groups" VMM_OUTPUT="$OUTPUT_MODE" \
-        "$DIR/tools/build-ovmf.sh" "$edk2" "$BUILD/ovmf" ||
-        die "OVMF build failed (see $log)"
+    mkdir -p "$(dirname "$log")"
+    OVMF_GROUPS="$ovmf_groups" \
+        "$DIR/tools/build-ovmf.sh" "$edk2" "$BUILD/ovmf" 2>&1 | tee "$log" | filter_output || die "OVMF build failed"
 }
 
 # ------------------------------------------------------------------- launchers
@@ -2626,6 +2470,13 @@ install_launchers() {
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="$DIR"
+# When launch.sh is copied to the install root (filesystems without symlink
+# support), the real prefix lives alongside it; cd into it so relative
+# profile/config paths and the desktop Exec= rewrite resolve correctly.
+if [ -d "$DIR/prefix" ]; then
+    cd "$DIR/prefix" || exit 1
+    PREFIX="$(pwd)"
+fi
 QEMU="$PREFIX/qemu"
 
 [ -f "$PREFIX/profile.conf" ] && . "$PREFIX/profile.conf"
@@ -2768,7 +2619,7 @@ front_link() {
 ensure_front_links() {
     [ "$ROOT" = "$DIR" ] && return 0
     [ -x "$prefix/launch.sh" ] || return 0
-    front_link "prefix/launch.sh" "$ROOT/launch.sh"
+    front_link "$prefix/launch.sh" "$ROOT/launch.sh"
 }
 
 install_desktop_item() {

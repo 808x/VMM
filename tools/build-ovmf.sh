@@ -133,10 +133,8 @@ build_one() {
     local name="$1" code="$2" vars="$3"; shift 3
     note "$name"
     rm -rf "$SRC/Build/OvmfX64"
-    local quiet=()
-    [ "${VMM_OUTPUT:-stream}" = quiet ] && quiet=(-q)
     ( cd "$SRC" && "$BUILD" -a X64 -t GCC5 -b RELEASE \
-        -p OvmfPkg/OvmfPkgX64.dsc -D FD_SIZE_4MB ${quiet[@]+"${quiet[@]}"} "$@" -n "$JOBS" )
+        -p OvmfPkg/OvmfPkgX64.dsc -D FD_SIZE_4MB "$@" -n "$JOBS" )
     mkdir -p "$OUT"
     cp "$FV/OVMF_CODE.fd" "$OUT/$code"
     cp "$FV/OVMF_VARS.fd" "$OUT/$vars"
