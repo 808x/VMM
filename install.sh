@@ -13,6 +13,7 @@ else
     DIR="$SELF_DIR"
 fi
 CONF="$DIR/tools/upstreams.conf"
+[ -f "$DIR/tools/lib.sh" ] && . "$DIR/tools/lib.sh"
 BUILD="${VMM_BUILD_DIR:-$DIR/build}"
 STATE="${VMM_STATE_DIR:-$DIR/state}"
 DEPS_STATE="$STATE/new-deps"
@@ -219,7 +220,7 @@ engine_cache_init() {
     [ "${#ENGINES[@]}" -gt 0 ] || die "no engines reported by tools/build.sh"
 }
 
-patch_field() {
+unit_field() {
     local page="$1" flag="$2" field="$3"
     case "$field" in
         name) printf '%s' "${U_NAME["$page|$flag"]:-}" ;;
@@ -240,7 +241,7 @@ patch_flags() {
 default_groups() {
     local page="$1" f out=""
     for f in $(patch_flags "$page"); do
-        [ "$(patch_field "$page" "$f" tick)" = yes ] && out="${out:+$out,}$f"
+        [ "$(unit_field "$page" "$f" tick)" = yes ] && out="${out:+$out,}$f"
     done
     printf '%s' "$out"
 }
@@ -250,10 +251,10 @@ list_patches() {
     printf '%-14s %-12s %-10s %-9s %-6s %s\n' ENGINE FLAG DEPENDS TICK NAME DESCRIPTION
     for engine in "${ENGINES[@]}"; do
         for f in $(patch_flags "$engine"); do
-            deps=$(patch_field "$engine" "$f" deps)
+            deps=$(unit_field "$engine" "$f" deps)
             printf '%-14s %-12s %-10s %-9s %-6s %s\n' "$engine" "$f" \
-                "${deps:--}" "$(patch_field "$engine" "$f" tick)" \
-                "$(patch_field "$engine" "$f" name)" "$(patch_field "$engine" "$f" desc)"
+                "${deps:--}" "$(unit_field "$engine" "$f" tick)" \
+                "$(unit_field "$engine" "$f" name)" "$(unit_field "$engine" "$f" desc)"
         done
     done
 }
@@ -266,7 +267,7 @@ validate_selection() {
             *" $g "*) ;;
             *) die "unknown $engine flag '$g' (see --list-patches)" ;;
         esac
-        deps=$(patch_field "$engine" "$g" deps)
+        deps=$(unit_field "$engine" "$g" deps)
         for d in $(printf '%s' "$deps" | tr ',' ' '); do
             [ -n "$d" ] || continue
             case " $(printf '%s' "$sel" | tr ',' ' ') " in
@@ -704,10 +705,6 @@ fi
 
 
 
-as_root() {
-    if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi
-}
-
 
 menu_list_has() {
     case ",$1," in *",$2,"*) return 0 ;; esac
@@ -912,12 +909,12 @@ menu_toggle_patch_group() {
         for f in $(patch_flags "$engine"); do
             [ "$(u_on "$engine" "$f")" = 1 ] || continue
             [ "$f" = "$flag" ] && continue
-            menu_list_has "$(patch_field "$engine" "$f" deps)" "$flag" ||
+            menu_list_has "$(unit_field "$engine" "$f" deps)" "$flag" ||
                 new="${new:+$new,}$f"
         done
     else
         new=$(menu_units get "$engine" patch)
-        for f in $flag $(printf '%s' "$(patch_field "$engine" "$flag" deps)" | tr ',' ' '); do
+        for f in $flag $(printf '%s' "$(unit_field "$engine" "$flag" deps)" | tr ',' ' '); do
             [ -n "$f" ] || continue
             case ",$new," in *",$f,"*) ;; *) new="${new:+$new,}$f" ;; esac
         done

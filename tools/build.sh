@@ -45,6 +45,7 @@ ROOT="$(cd "$SELF_DIR/.." && pwd)"
 CONF="$SELF_DIR/upstreams.conf"
 PATCH_ROOT="$ROOT/patches"
 TOOL_ROOT="$ROOT/tools"
+[ -f "$SELF_DIR/lib.sh" ] && . "$SELF_DIR/lib.sh"
 
 # Link targets per engine.  Only OVMF has a second (CODE + VARS) pair.
 declare -A ENG_LINK_TAG1=([qemu]=QEMU [ovmf]=CODE [virt-manager]=virt-manager)
@@ -65,9 +66,6 @@ OVMF_VARS_PATHS=(
     "/usr/share/ovmf/x64/OVMF_VARS.4m.fd"
 )
 
-note() { echo "-- $*"; }
-die() { echo "build: $*" >&2; exit 1; }
-
 conf_get() {
     awk -F= -v s="[$1]" -v k="$2" '
         $0 == s { on = 1; next }
@@ -80,7 +78,7 @@ conf_get() {
 # ---------------------------------------------------------------- metadata
 
 # Print the first value of KEY from the leading comment block of FILE.
-patch_field() {
+header_field() {
     local file="$1" key="$2" line val
     while IFS= read -r line; do
         line="${line%$'\r'}"
@@ -143,12 +141,12 @@ unit_scan_page() {
     [ -n "$page" ] || die "unit_scan_page: empty page"
     [ -d "$dir" ] || return 0
     while IFS= read -r f; do
-        flag=$(patch_field "$f" VMM_FLAG)
-        name=$(patch_field "$f" VMM_NAME)
-        desc=$(patch_field "$f" VMM_DESC)
+        flag=$(header_field "$f" VMM_FLAG)
+        name=$(header_field "$f" VMM_NAME)
+        desc=$(header_field "$f" VMM_DESC)
         # A file missing the mandatory fields is skipped, not fatal.
         [ -n "$flag" ] && [ -n "$name" ] && [ -n "$desc" ] || continue
-        hpage=$(patch_field "$f" VMM_PAGE)
+        hpage=$(header_field "$f" VMM_PAGE)
         rel="${f#"$ROOT"/}"
         [ -n "$hpage" ] || die "$rel: VMM_PAGE is required"
         [ "$hpage" = "$page" ] ||
@@ -157,16 +155,16 @@ unit_scan_page() {
             die "duplicate $kind flag '$flag' in $page (${seen[$flag]} and $rel)"
         seen[$flag]="$rel"
         if [ "$kind" = patch ]; then
-            deps=$(patch_field "$f" VMM_DEPS)
+            deps=$(header_field "$f" VMM_DEPS)
             [ "$deps" = "-" ] && deps=""
-            tick=$(unit_bool no "$(patch_field "$f" VMM_TICK)" "$rel")
+            tick=$(unit_bool no "$(header_field "$f" VMM_TICK)" "$rel")
             post=no
             sudo=no
         else
             deps=""
             tick=no
-            post=$(unit_bool yes "$(patch_field "$f" VMM_POST)" "$rel")
-            sudo=$(unit_bool no "$(patch_field "$f" VMM_SUDO)" "$rel")
+            post=$(unit_bool yes "$(header_field "$f" VMM_POST)" "$rel")
+            sudo=$(unit_bool no "$(header_field "$f" VMM_SUDO)" "$rel")
         fi
         unit_emit "$kind" "$page" "$flag" "$name" "$desc" \
             "$deps" "$rel" "$tick" "$post" "$sudo"
@@ -391,7 +389,7 @@ patch_apply() {
                 fi
                 ;;
             *.sh)
-                skey=$(patch_field "$file" VMM_SOURCE)
+                skey=$(header_field "$file" VMM_SOURCE)
                 src=""
                 if [ -n "$skey" ]; then
                     src=$(source_checkout "$skey")
