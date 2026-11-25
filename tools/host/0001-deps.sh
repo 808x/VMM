@@ -2,6 +2,9 @@
 # VMM_PAGE: host
 # VMM_FLAG: deps
 # VMM_NAME: Install build and runtime dependencies (host-global)
+# VMM_VAR: install_deps
+# VMM_PHASE: early
+# VMM_ARGS: --install build,runtime
 # VMM_DESC: Compiler, meson/ninja and dev headers for the build; GTK3, libvirt, spice and Vulkan to run it.
 # VMM_SUDO: yes
 # VMM_POST: no

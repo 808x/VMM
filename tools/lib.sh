@@ -23,6 +23,19 @@ section() {
         "${c_bold:-}${c_cyan:-}" "${c_reset:-}" "${c_bold:-}" "$*" "${c_reset:-}"
 }
 
+header_field() {
+    local file="$1" key="$2" line val
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        case "$line" in
+            "# $key:"*) val="${line#*"$key":}"; printf '%s\n' "${val# }"; return 0 ;;
+            "#"*|"") ;;
+            *) return 0 ;;
+        esac
+    done < "$file"
+    return 0
+}
+
 # Read a key from a section of tools/upstreams.conf.  Both the installer and
 # tools/build.sh use this, so the parser lives here instead of twice.
 conf_get() {

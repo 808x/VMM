@@ -69,18 +69,6 @@ OVMF_VARS_PATHS=(
 # ---------------------------------------------------------------- metadata
 
 # Print the first value of KEY from the leading comment block of FILE.
-header_field() {
-    local file="$1" key="$2" line val
-    while IFS= read -r line; do
-        line="${line%$'\r'}"
-        case "$line" in
-            "# $key:"*) val="${line#*"$key":}"; printf '%s\n' "${val# }"; return 0 ;;
-            "#"*|"") ;;
-            *) return 0 ;;
-        esac
-    done < "$file"
-    return 0
-}
 
 # Print every value of KEY from the leading comment block of FILE.
 patch_list_field() {

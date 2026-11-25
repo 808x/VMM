@@ -2,6 +2,8 @@
 # VMM_PAGE: after
 # VMM_FLAG: desktop-item
 # VMM_NAME: Create .desktop launcher item
+# VMM_VAR: launchitem
+# VMM_PHASE: post
 # VMM_DESC: Write vmm.desktop so the app appears in the desktop menu.
 set -eu
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

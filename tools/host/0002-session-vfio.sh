@@ -2,6 +2,8 @@
 # VMM_PAGE: host
 # VMM_FLAG: session-vfio
 # VMM_NAME: Session VFIO helper (host-global)
+# VMM_VAR: session_vfio
+# VMM_PHASE: post
 # VMM_DESC: Install /usr/local/sbin/vmm-vfio-ctl, a udev rule and sudoers entry.
 # VMM_SUDO: yes
 set -eu

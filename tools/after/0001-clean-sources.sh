@@ -2,6 +2,8 @@
 # VMM_PAGE: after
 # VMM_FLAG: clean-sources
 # VMM_NAME: Remove sources and downloads
+# VMM_VAR: clean_sources
+# VMM_PHASE: final
 # VMM_DESC: Delete the source cache and build outputs; safe to rebuild later.
 set -eu
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

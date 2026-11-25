@@ -2,6 +2,8 @@
 # VMM_PAGE: after
 # VMM_FLAG: clean-deps
 # VMM_NAME: Remove build dependencies
+# VMM_VAR: clean_deps
+# VMM_PHASE: final
 # VMM_DESC: Runtime dependencies are always kept; only build-only packages are removed.
 # VMM_SUDO: yes
 set -eu

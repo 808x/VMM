@@ -40,7 +40,7 @@ ovmf_groups=""
 ovmf_bin_given=0
 ovmf_groups_given=0
 install_deps=0
-host_deps=0
+install_deps=0
 session_vfio=0
 libvirt_access=1
 libvirt_access_given=0
@@ -143,6 +143,7 @@ ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 
 ENGINES=()
 declare -A U_KIND=() U_NAME=() U_DESC=() U_DEPS=() U_PATH=() U_SUDO=() U_TICK=() U_ON=()
+declare -A U_VAR=() U_PHASE=() U_ARGS=()
 declare -A PAGE_UNITS=() PAGE_KIND=()
 PAGE_ORDER=()
 declare -A BUILD_MODES=()
@@ -245,6 +246,7 @@ record_load() {
     local kind="" page="" flag="" name="" desc="" deps="" path="" tick="" post="" sudo=""
     PAGE_ORDER=(); PAGE_UNITS=(); PAGE_KIND=()
     U_KIND=(); U_NAME=(); U_DESC=(); U_DEPS=(); U_PATH=(); U_SUDO=(); U_TICK=(); U_ON=()
+    U_VAR=(); U_PHASE=(); U_ARGS=()
     while IFS='|' read -r kind page flag name desc deps path tick post sudo; do
         [ -n "$flag" ] || continue
         U_KIND["$page|$flag"]=$kind
@@ -255,6 +257,15 @@ record_load() {
         U_SUDO["$page|$flag"]=$sudo
         U_TICK["$page|$flag"]=$tick
         U_ON["$page|$flag"]=0
+        if [ "$kind" = tool ]; then
+            local src="$DIR/$path"
+            U_VAR["$page|$flag"]=$(header_field "$src" VMM_VAR)
+            U_PHASE["$page|$flag"]=$(header_field "$src" VMM_PHASE)
+            U_ARGS["$page|$flag"]=$(header_field "$src" VMM_ARGS)
+            [ -n "${U_VAR["$page|$flag"]:-}" ] ||
+                U_VAR["$page|$flag"]=$(printf '%s' "$flag" | tr '-' '_')
+            [ -n "${U_PHASE["$page|$flag"]:-}" ] || U_PHASE["$page|$flag"]=post
+        fi
         case " ${PAGE_UNITS[$page]:-} " in
             *" $flag "*) ;;
             *) PAGE_UNITS[$page]="${PAGE_UNITS[$page]:+${PAGE_UNITS[$page]} }$flag" ;;
@@ -441,7 +452,30 @@ _tool_exec() {
 
 run_tool() { _tool_exec yes "$@"; }
 
+tool_var() {
+    local p
+    for p in host after; do
+        [ -n "${U_VAR[$p|$1]:-}" ] && { printf '%s' "${U_VAR[$p|$1]}"; return 0; }
+    done
+}
 probe_tool() { _tool_exec no "$@"; }
+
+# Run all selected tools in one phase.  Order comes from NNNN-name in each
+# page; VMM_PHASE and VMM_VAR/VMM_ARGS come from the tool headers.
+run_tools_phase() {
+    local phase="$1" page f v args
+    for page in host after; do
+        for f in ${PAGE_UNITS[$page]:-}; do
+            [ "$(u_kind "$page" "$f")" = tool ] || continue
+            [ "${U_PHASE[$page|$f]:-post}" = "$phase" ] || continue
+            v=$(tool_var "$f")
+            [ -n "$v" ] || continue
+            [ "${!v:-0}" = 1 ] || continue
+            args=${U_ARGS[$page|$f]:-}
+            run_tool "$f" $args
+        done
+    done
+}
 
 engine_cache_init
 tools_cache_init
@@ -482,18 +516,11 @@ while [ $# -gt 0 ]; do
             shift ;;
         --tool=*)
             for t in $(printf '%s' "${1#*=}" | tr ',' ' '); do
-                case "$t" in
-                    deps)          install_deps=1 ;;
-                    session-vfio)  session_vfio=1 ;;
-                    libvirt-access) libvirt_access=1; libvirt_access_given=1 ;;
-                    write-xml)     emit_domains=1 ;;
-                    verify)        verify=1 ;;
-                    desktop-item)  launchitem=1 ;;
-                    clean-deps)    clean_deps=1; clean_given=1 ;;
-                    clean-sources) clean_sources=1; clean_given=1 ;;
-                    none|"")       ;;
-                    *) die "--tool: unknown item '$t' (see --help)" ;;
-                esac
+                [ -z "$t" ] && continue
+                v=$(tool_var "$t")
+                [ -n "$v" ] || die "--tool: unknown item '$t' (see --help)"
+                printf -v "$v" '%s' 1
+                [ "$t" = libvirt-access ] && libvirt_access_given=1
             done
             shift ;;
         --update) update=1; shift ;;
@@ -1040,7 +1067,7 @@ menu_render_review() {
     done
     nbuild=$(menu_deps_missing); nrun=$DEP_MISSING_RUNTIME
     if [ "$nbuild" -gt 0 ] || [ "$nrun" -gt 0 ]; then c_deps=$c_error; else c_deps=$c_success; fi
-    if [ "$host_deps" = 1 ]; then depstr="install (build+runtime)"
+    if [ "$install_deps" = 1 ]; then depstr="install (build+runtime)"
     elif [ "$nbuild" -gt 0 ] || [ "$nrun" -gt 0 ]; then depstr=missing
     else depstr=ok; fi
 
@@ -1105,7 +1132,7 @@ menu_render_review() {
 menu_render() {
     local nrun nbuild
     MENU_PAGE_WARN=""
-    if [ "$host_deps" = 0 ]; then
+    if [ "$install_deps" = 0 ]; then
         nrun=$DEP_MISSING_RUNTIME
         case "$menu_page" in
             4)
@@ -1291,18 +1318,6 @@ menu_edit_build_path() {
     menu_link_state || true
 }
 
-tool_var() {
-    case "$1" in
-        deps)          printf 'host_deps' ;;
-        session-vfio)  printf 'session_vfio' ;;
-        libvirt-access) printf 'libvirt_access' ;;
-        write-xml)     printf 'emit_domains' ;;
-        clean-deps)    printf 'clean_deps' ;;
-        clean-sources) printf 'clean_sources' ;;
-        verify)        printf 'verify' ;;
-        desktop-item)  printf 'launchitem' ;;
-    esac
-}
 
 tool_set() {
     local flag="$1" on="$2" v
@@ -1433,7 +1448,7 @@ menu_sync() {
         menu_page_mode
     else
         clean_given=1; misc_given=1
-        [ "$host_deps" = 1 ] && install_deps=1
+        [ "$install_deps" = 1 ] && install_deps=1
     fi
 }
 
@@ -1516,11 +1531,8 @@ if [ -z "$qemu_bin$vm_bin$ovmf_bin" ] && \
     exit 0
 fi
 
-if [ "$install_deps" = 1 ]; then
-    note "installing build and runtime dependencies"
-    run_tool deps --install build,runtime
-    DEPS_SCANNED=0
-fi
+run_tools_phase early
+[ "$install_deps" = 1 ] && DEPS_SCANNED=0
 
 deps_scan
 
@@ -1846,7 +1858,7 @@ fi
 if [ "$qemu_bin" = compile ] || [ "$qemu_bin" = link ] ||
    [ "$vm_bin" = compile ] || [ "$vm_bin" = link ]; then
     install_launchers || die "launcher install failed"
-    [ "$libvirt_access" = 1 ] && run_tool libvirt-access
+    run_tools_phase define
     "$DIR/share/bin/vmm-relocate" "$prefix" || die "prefix relocation failed"
     if command -v virsh >/dev/null 2>&1 &&
        [ -x "$prefix/bin/vmm-render" ] && [ -f "$prefix/profile.conf" ]; then
@@ -1857,22 +1869,9 @@ elif [ -n "$ovmf_mode" ]; then
     mkdir -p "$prefix"
     install_firmware
 fi
-[ "$session_vfio" = 1 ] && run_tool session-vfio
 ensure_front_links
-[ "$emit_domains" = 1 ] && run_tool write-xml
-[ "$verify" = 1 ] && run_tool verify
-[ "$launchitem" = 1 ] && run_tool desktop-item
-
-if [ "$clean_sources" = 1 ] || [ "$clean_deps" = 1 ]; then
-    [ "$clean_sources" = 1 ] && run_tool clean-sources
-    if [ "$clean_deps" = 1 ]; then
-        if [ -s "$DEPS_STATE" ]; then
-            run_tool clean-deps
-        else
-            note "no build packages recorded; nothing to remove"
-        fi
-    fi
-fi
+run_tools_phase post
+run_tools_phase final
 if [ "$clean_sources" = 0 ] && [ -d "$BUILD" ]; then
     note "build sources kept at $BUILD"
 fi

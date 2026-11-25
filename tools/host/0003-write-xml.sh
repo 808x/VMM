@@ -2,6 +2,8 @@
 # VMM_PAGE: host
 # VMM_FLAG: write-xml
 # VMM_NAME: Write domain XML examples
+# VMM_VAR: emit_domains
+# VMM_PHASE: post
 # VMM_DESC: Render cachyos.xml and windows.xml into prefix/share/examples.
 set -eu
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

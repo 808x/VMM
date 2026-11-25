@@ -198,7 +198,7 @@ Linux with KVM, libvirt (session daemon), Python 3 + PyGObject, GTK3, spice-gtk,
 ## Reproducibility
 
 - Upstream locks (QEMU 11.1.3, virt-manager v5.1.0, vmvga `d5bb723f…`, virglrenderer `18dbf187…`, dxvk-native v3.1.1) are in `tools/upstreams.conf`.
-- Patch/tool records are declared in leading `VMM_*` comment headers: `VMM_PAGE`, `VMM_FLAG`, `VMM_NAME`, `VMM_DESC`, optional `VMM_DEPS`, `VMM_TICK`, `VMM_SUDO`, `VMM_POST`, `VMM_SOURCE`, `VMM_INSTALL`.
+- Patch/tool records are declared in leading `VMM_*` comment headers: `VMM_PAGE`, `VMM_FLAG`, `VMM_NAME`, `VMM_DESC`, optional `VMM_DEPS`, `VMM_TICK`, `VMM_SUDO`, `VMM_POST`, `VMM_SOURCE`, `VMM_INSTALL`, `VMM_VAR`, `VMM_PHASE`, `VMM_ARGS`.
 - `NNNN-name` files are read in `LC_ALL=C` order; that order is execution order.
 - The patched-tree stamp is an md5 of patch contents, not of flag names, so editing a patch invalidates it.
 

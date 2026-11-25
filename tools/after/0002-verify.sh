@@ -2,6 +2,8 @@
 # VMM_PAGE: after
 # VMM_FLAG: verify
 # VMM_NAME: Verify installation
+# VMM_VAR: verify
+# VMM_PHASE: post
 # VMM_DESC: Check the launcher, QEMU and firmware paths after install.
 set -eu
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
