@@ -66,15 +66,6 @@ OVMF_VARS_PATHS=(
     "/usr/share/ovmf/x64/OVMF_VARS.4m.fd"
 )
 
-conf_get() {
-    awk -F= -v s="[$1]" -v k="$2" '
-        $0 == s { on = 1; next }
-        /^\[/ { on = 0 }
-        on && $1 ~ "^[[:space:]]*" k "[[:space:]]*$" {
-            sub(/^[^=]*=/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit
-        }' "$CONF"
-}
-
 # ---------------------------------------------------------------- metadata
 
 # Print the first value of KEY from the leading comment block of FILE.
@@ -792,28 +783,6 @@ build_engine() {
     esac
 }
 
-usage() {
-    cat <<EOF
-usage: tools/build.sh COMMAND
-
-  --list-engines                 CLI_PREFIX|ENGINE|VAR
-  --list                         KIND|PAGE|FLAG|NAME|DESC|DEPS|PATH|TICK|POST|SUDO
-  --list-builds ENGINE           MODE|LABEL|DESCRIPTION|PATHKIND
-  --list-patches ENGINE          FLAG|NAME|DESC|DEPS|TICK|PATH
-  --query FIELD ENGINE FLAGS     FIELD: path|name|desc|deps|tick
-  build ENGINE --patch=FLAGS     apply patches and build
-  dxvk                           build the dxvk-native tarball
-
-The record emitted by --list is the single source of truth for the TUI:
-KIND is patch, tool or bin; PAGE is the engine for patches and bins and
-host/after for tools.  DEPS is a comma list and empty for "none".
-PATH is a repo-relative file for patches/tools and TAG=value;TAG=value
-for link modes.  Booleans are yes/no and are always present.
-
-Paths and flags come from the environment (VMM_SRC, VMM_BUILD, VMM_PREFIX,
-VMM_JOBS, VMM_CFLAGS, VMM_CXXFLAGS) plus the upstreams.conf locks.
-EOF
-}
 
 case "${1:-}" in
     --list-engines) list_engines ;;
@@ -836,6 +805,6 @@ case "${1:-}" in
         build_engine "$eng" "$patches"
         ;;
     dxvk) do_dxvk ;;
-    ""|-h|--help) usage ;;
+    ""|-h|--help) build_usage ;;
     *) die "unknown command: $1" ;;
 esac

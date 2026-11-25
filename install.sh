@@ -137,64 +137,7 @@ declare -A ENGINE_LABEL=([qemu]=QEMU [ovmf]=OVMF [virt-manager]=VIRT-MGR)
 declare -A ENGINE_LINK_VAR1=([qemu]=qemu_link [ovmf]=ovmf_code [virt-manager]=vm_link)
 declare -A ENGINE_LINK_VAR2=([ovmf]=ovmf_vars)
 
-usage() {
-    local page flag desc
-    record_load
-    cat <<EOF
-usage: ./install.sh [actions]
 
-  With no component flags on a terminal, opens the build menu.  Missing
-  choices are asked there; fully specified flags run unattended.
-
- Components
-   --qemu:bin=compile|skip|link:PATH     QEMU binary source
-   --qemu:patch=LIST                    QEMU patch groups (empty = none)
-   --ovmf:bin=pull|compile|link|skip    firmware source
-   --ovmf:code=PATH --ovmf:vars=PATH    firmware files to link
-   --ovmf:patch=LIST                    OVMF patch groups (empty = none)
-   --virtmgr:bin=compile|skip|link:PATH virt-manager binary source
-   --virtmgr:patch=LIST                 virt-manager patch groups
-
- After the build
-   --tool=LIST                    one or more, comma separated:
-EOF
-    for page in "${PAGE_ORDER[@]}"; do
-        [ "${PAGE_KIND[$page]:-}" = tool ] || continue
-        for flag in ${PAGE_UNITS[$page]:-}; do
-            [ "$(u_kind "$page" "$flag")" = tool ] || continue
-            desc=${U_DESC["$page|$flag"]}
-            printf '                                   %-14s %s\n' "$flag" "$desc"
-        done
-    done
-    cat <<EOF
-
- Other
-   --update                       resolve latest upstreams and rewrite the lock
-   --list-patches                 list discovered patches
-   --prefix=DIR                   install prefix (default: ./prefix)
-   --jobs=N                       parallel build jobs (default: nproc)
-   --dxvk-tarball=FILE            use this dxvk-native tarball instead of building
-   --dry-run                      resolve and report, change nothing
-   -h, --help
-
- Patch values are the flag names shown in the TUI; run --list-patches to
- list them.
-EOF
-}
-
-die() { printf '%sERROR:%s %s\n' "$c_red" "$c_reset" "$*" >&2; exit 1; }
-note() { printf '%s--%s %s\n' "$c_bold$c_cyan" "$c_reset" "$*"; }
-warn() { printf '%sWARNING:%s %s\n' "$c_yellow" "$c_reset" "$*" >&2; }
-section() { printf '\n%s==>%s %s%s%s\n' "$c_bold$c_cyan" "$c_reset" "$c_bold" "$*" "$c_reset"; }
-
-conf_get() {
-    awk -v s="[$1]" -v k="$2" '
-        $0 == s { in_s = 1; next }
-        /^\[/ { in_s = 0 }
-        in_s && $1 == k {
-            sub(/^[^=]*=[ \t]*/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); print; exit
-        }' "$CONF"
-}
 
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 
@@ -505,7 +448,7 @@ tools_cache_init
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -h|--help) usage; exit 0 ;;
+        -h|--help) install_usage; exit 0 ;;
         --list-patches) list=1; shift ;;
         --*:bin=*|--*:patch=*)
             arg="${1#--}"
