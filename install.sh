@@ -159,7 +159,7 @@ usage: ./install.sh [actions]
 EOF
     for page in "${PAGE_ORDER[@]}"; do
         [ "${PAGE_KIND[$page]:-}" = tool ] || continue
-        for flag in $(page_flags "$page"); do
+        for flag in ${PAGE_UNITS[$page]:-}; do
             [ "$(u_kind "$page" "$flag")" = tool ] || continue
             desc=${U_DESC["$page|$flag"]}
             printf '                                   %-14s %s\n' "$flag" "$desc"
@@ -211,7 +211,7 @@ engine_cache_init() {
         [ "${PAGE_KIND[$page]:-}" = engine ] || continue
         ENGINES+=("$page")
         modes=""
-        for f in $(page_flags "$page"); do
+        for f in ${PAGE_UNITS[$page]:-}; do
             [ "$(u_kind "$page" "$f")" = bin ] && modes="${modes:+$modes }$f"
         done
         BUILD_MODES[$page]=$modes
@@ -232,7 +232,7 @@ patch_field() {
 
 patch_flags() {
     local page="$1" f
-    for f in $(page_flags "$page"); do
+    for f in ${PAGE_UNITS[$page]:-}; do
         [ "$(u_kind "$page" "$f")" = patch ] && printf '%s\n' "$f"
     done
 }
@@ -327,9 +327,7 @@ record_load() {
         die "cannot read the unit record from tools/build.sh"
 }
 
-menu_catalog_init() { record_load; }
 
-page_flags() { printf '%s' "${PAGE_UNITS[$1]:-}"; }
 u_kind() { printf '%s' "${U_KIND["$1|$2"]:-}"; }
 u_on() { printf '%s' "${U_ON["$1|$2"]:-0}"; }
 u_set() { U_ON["$1|$2"]=$3; }
@@ -397,7 +395,7 @@ menu_page_info() {
 
 menu_units() {
     local op="$1" page="$2" kind="$3" arg="${4:-}" f out="" n=0
-    for f in $(page_flags "$page"); do
+    for f in ${PAGE_UNITS[$page]:-}; do
         [ "$(u_kind "$page" "$f")" = "$kind" ] || continue
         n=$((n + 1))
         case "$op" in
@@ -418,16 +416,9 @@ menu_units() {
     esac
 }
 
-menu_bin_get()    { menu_units get   "$1" bin; }
-menu_bin_set()    { menu_units set   "$1" bin "$2"; }
-menu_bin_flag()   { menu_bin_get "$1"; }
-menu_groups_get() { menu_units get   "$1" patch; }
-menu_groups_set() { menu_units set   "$1" patch "$2"; }
-menu_flag_count_kind() { menu_units count "$1" "$2"; }
-
 menu_link() {
     local op="$1" eng="$2" idx="${3:-1}" value="${4:-}" f tags tag n=0
-    f=$(menu_bin_flag "$eng")
+    f=$(menu_units get "$eng" bin)
     tags=$(u_path_tags "$eng" "$f")
     for tag in $tags; do
         n=$((n + 1))
@@ -479,7 +470,7 @@ tools_cache_init() {
     local page flag
     for page in "${PAGE_ORDER[@]}"; do
         [ "${PAGE_KIND[$page]:-}" = tool ] || continue
-        for flag in $(page_flags "$page"); do
+        for flag in ${PAGE_UNITS[$page]:-}; do
             [ "$(u_kind "$page" "$flag")" = tool ] || continue
             TOOL_PATH["$flag"]="${U_PATH["$page|$flag"]}"
             TOOL_SUDO["$flag"]="${U_SUDO["$page|$flag"]}"
@@ -765,12 +756,6 @@ menu_calc_width() {
     MENU_COLS=$c
 }
 
-menu_rule() {
-    local n="$1" out=""
-    while [ ${#out} -lt "$n" ]; do out="$out-"; done
-    printf '%s' "$out"
-}
-
 menu_frame() {
     local right="page $menu_page/$menu_pages" gap
     menu_calc_width
@@ -780,7 +765,7 @@ menu_frame() {
     printf ' %s%sVMM BUILDER%s%*s%s%s%s\n' \
         "$c_bold" "$c_primary" "$c_reset" "$gap" "" \
         "$c_border" "$right" "$c_reset"
-    printf ' %s%s%s\n' "$c_border" "$(menu_rule "$((MENU_COLS - 1))")" "$c_reset"
+    printf ' %s%s%s\n' "$c_border" "$(printf '%*s' $((MENU_COLS - 1)) '' | tr ' ' '-')" "$c_reset"
 }
 
 menu_tabs() {
@@ -860,25 +845,9 @@ menu_row() {
         "$pad" "" "$valuecol" "$right" "$c_reset"
 }
 
-menu_mark() {
-    if [ "$2" = 1 ]; then
-        [ "$1" = radio ] && printf '(*)' || printf '[*]'
-    else
-        [ "$1" = radio ] && printf '( )' || printf '[ ]'
-    fi
-}
-
 menu_path_line() {
     local text="$1" colour="${2:-$c_muted}"
     printf '           %s%s%s\n' "$colour" "$text" "$c_reset"
-}
-
-menu_found_colour() {
-    if [ "$menu_revert_label" = "$1" ]; then
-        printf '%s' "$c_warning"
-    else
-        printf '%s' "$c_success"
-    fi
 }
 
 # Fold text into width w, using prefix p for the first line and rest for
@@ -906,9 +875,9 @@ menu_path_ok() { [ -n "$1" ] && [ -e "$1" ]; }
 
 menu_deps_missing() {
     local n=0
-    [ "$(menu_bin_get qemu)" = compile ] && n=$((n + DEP_MISSING_QEMU))
-    [ "$(menu_bin_get ovmf)" = compile ] && n=$((n + DEP_MISSING_OVMF))
-    [ "$(menu_bin_get virt-manager)" = compile ] && n=$((n + DEP_MISSING_VM))
+    [ "$(menu_units get qemu bin)" = compile ] && n=$((n + DEP_MISSING_QEMU))
+    [ "$(menu_units get ovmf bin)" = compile ] && n=$((n + DEP_MISSING_OVMF))
+    [ "$(menu_units get virt-manager bin)" = compile ] && n=$((n + DEP_MISSING_VM))
     printf '%s' "$n"
 }
 
@@ -947,28 +916,22 @@ menu_toggle_patch_group() {
                 new="${new:+$new,}$f"
         done
     else
-        new=$(menu_groups_get "$engine")
+        new=$(menu_units get "$engine" patch)
         for f in $flag $(printf '%s' "$(patch_field "$engine" "$flag" deps)" | tr ',' ' '); do
             [ -n "$f" ] || continue
             case ",$new," in *",$f,"*) ;; *) new="${new:+$new,}$f" ;; esac
         done
     fi
-    menu_groups_set "$engine" "$(menu_dedupe "$new")"
-}
-
-menu_letters_end() {
-    local letters=ABCDEFGHIJKLMNOPQRSTUVWXYZ n="$1"
-    [ "$n" -lt 1 ] && n=1
-    printf '%s' "${letters:$((n - 1)):1}"
+    menu_units set "$engine" patch "$(menu_dedupe "$new")"
 }
 
 menu_status() {
     local eng val out="" short plain=""
     for eng in "${ENGINES[@]}"; do
-        val=$(menu_bin_get "$eng")
+        val=$(menu_units get "$eng" bin)
         if [ "$val" = compile ]; then
-            val="compile ($(menu_units count "$eng" patch)/$(menu_flag_count_kind "$eng" patch))"
-            short="c$(menu_units count "$eng" patch)/$(menu_flag_count_kind "$eng" patch)"
+            val="compile ($(menu_units count "$eng" patch)/$(menu_units count "$eng" patch))"
+            short="c$(menu_units count "$eng" patch)/$(menu_units count "$eng" patch)"
         elif [ "$val" = pull ]; then
             val=bundled; short=bundled
         else
@@ -997,18 +960,19 @@ menu_status() {
 }
 
 menu_keys() {
-    local key eng n last tags label range
+    local key eng n last tags label range letters=ABCDEFGHIJKLMNOPQRSTUVWXYZ
     key=$(menu_page_info key)
     eng=$(menu_page_info engine)
     if [ -n "$eng" ]; then
         n=1
-        [ "$(menu_bin_get "$eng")" = compile ] &&
-            n=$((1 + $(menu_flag_count_kind "$eng" patch)))
+        [ "$(menu_units get "$eng" bin)" = compile ] &&
+            n=$((1 + $(menu_units count "$eng" patch)))
     else
-        n=$(menu_flag_count_kind "$key" tool)
+        n=$(menu_units count "$key" tool)
     fi
     if menu_build_blocked; then last=4; else last=${#PAGES[@]}; fi
-    range=$(menu_letters_end "$n")
+    [ "$n" -lt 1 ] && n=1
+    range=${letters:$((n - 1)):1}
     [ "$n" -gt 1 ] && range="A-$range"
     printf ' '
     if [ "$key" != review ]; then
@@ -1018,7 +982,7 @@ menu_keys() {
         printf '    '
     fi
     if [ "$menu_mode" = link ]; then
-        tags=$(u_path_tags "$eng" "$(menu_bin_flag "$eng")")
+        tags=$(u_path_tags "$eng" "$(menu_units get "$eng" bin)")
         label=$(printf '%s\n' "$tags" | tr '\n' '/'); label=${label%/}
         [ -n "$label" ] && printf '%s[/]%s Set %s path%s    ' \
             "$c_bold$c_info" "$c_reset" "$label" "$c_muted"
@@ -1047,7 +1011,7 @@ menu_render_page() {
     if [ -n "$eng" ]; then
         cli=${ENGINE_CLI[$eng]}
         title="BUILD ITEMS | ${ENGINE_LABEL[$eng]}"
-        bin=$(menu_bin_get "$eng")
+        bin=$(menu_units get "$eng" bin)
         idx=1
     else
         title=$(menu_page_info tab)
@@ -1055,14 +1019,14 @@ menu_render_page() {
     menu_section "$title"
     MENU_ACTION=()
     [ -n "$eng" ] && menu_subsection "Binaries" "--$cli:bin"
-    for f in $(page_flags "$page"); do
+    for f in ${PAGE_UNITS[$page]:-}; do
         kind=$(u_kind "$page" "$f")
         case "$kind" in
             bin)
                 [ -n "$eng" ] || continue
                 sel=$([ "$bin" = "$f" ] && echo 1 || echo 0)
                 menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-                    "${U_NAME["$page|$f"]}" "$f" "$(menu_mark radio "$sel")" "$sel"
+                    "${U_NAME["$page|$f"]}" "$f" "$([ "$sel" = 1 ] && printf '(*)' || printf '( )')" "$sel"
                 menu_note "$sel" "${U_DESC["$page|$f"]}"
                 [ "$sel" = 1 ] && [ -n "$(u_path_tags "$page" "$f")" ] &&
                     menu_render_paths "$page" "$f"
@@ -1071,7 +1035,7 @@ menu_render_page() {
                 [ -n "$eng" ] && [ "$bin" = compile ] || continue
                 if [ "$last" != patch ]; then
                     menu_subsection \
-                        "Patches ($(menu_units count "$eng" patch)/$(menu_flag_count_kind "$eng" patch))" \
+                        "Patches ($(menu_units count "$eng" patch)/$(menu_units count "$eng" patch))" \
                         "--$cli:patch"
                     last=patch
                 fi
@@ -1079,7 +1043,7 @@ menu_render_page() {
                 MENU_ACTION["${letter,,}"]="$page|$f|patch"
                 sel=$(u_on "$page" "$f")
                 menu_row "[$letter]" "${U_NAME["$page|$f"]}" "$f" \
-                    "$(menu_mark check "$sel")" "$sel"
+                    "$([ "$sel" = 1 ] && printf '[*]' || printf '[ ]')" "$sel"
                 menu_note "$sel" "${U_DESC["$page|$f"]}"
                 ;;
             tool)
@@ -1089,7 +1053,7 @@ menu_render_page() {
                 pend=0
                 [ "$menu_mode" = sudo ] && [ "$menu_sudo_pending" = "$f" ] && pend=1
                 menu_row "[$letter]" "${U_NAME["$page|$f"]}" "$f" \
-                    "$(menu_mark check "$sel")" "$sel" "$pend"
+                    "$([ "$sel" = 1 ] && printf '[*]' || printf '[ ]')" "$sel" "$pend"
                 menu_note "$sel" "${U_DESC["$page|$f"]}"
                 ;;
         esac
@@ -1105,9 +1069,9 @@ menu_render_paths() {
         val=$(u_path_get "$eng" "$flag" "$tag")
         if menu_path_ok "$val"; then
             if [ "$count" -gt 1 ]; then
-                menu_path_line "Found: $tag: $val" "$(menu_found_colour "$tag")"
+                menu_path_line "Found: $tag: $val" "$([ "$menu_revert_label" = "$tag" ] && printf '%s' "$c_warning" || printf '%s' "$c_success")"
             else
-                menu_path_line "Found: $val" "$(menu_found_colour "$tag")"
+                menu_path_line "Found: $val" "$([ "$menu_revert_label" = "$tag" ] && printf '%s' "$c_warning" || printf '%s' "$c_success")"
             fi
         elif [ "$count" -gt 1 ]; then
             menu_path_line "Not found: $tag" "$c_error"
@@ -1125,12 +1089,12 @@ menu_sudo_ok() {
 
 menu_render_review() {
     local eng clean="" misc="" host="" c_deps nbuild nrun depstr
-    for eng in $(page_flags after); do
+    for eng in ${PAGE_UNITS[after]:-}; do
         [ "$(u_kind after "$eng")$(u_on after "$eng")" = tool1 ] || continue
         case "$eng" in *clean*) clean="${clean:+$clean,}$eng" ;;
             *) misc="${misc:+$misc,}$eng" ;; esac
     done
-    for eng in $(page_flags host); do
+    for eng in ${PAGE_UNITS[host]:-}; do
         [ "$(u_kind host "$eng")$(u_on host "$eng")" = tool1 ] &&
             host="${host:+$host,}$eng"
     done
@@ -1159,7 +1123,7 @@ menu_render_review() {
     menu_subsection "Command"
     local args=() a flag value i=0 n tail bin groups tools=() cell tag
     for eng in "${ENGINES[@]}"; do
-        bin=$(menu_bin_get "$eng"); groups=$(menu_groups_get "$eng")
+        bin=$(menu_units get "$eng" bin); groups=$(menu_units get "$eng" patch)
         cli=${ENGINE_CLI[$eng]}
         case "$bin" in
             compile) args+=("--$cli:bin=compile" "--$cli:patch=$groups") ;;
@@ -1174,7 +1138,7 @@ menu_render_review() {
         esac
     done
     for a in host after; do
-        for flag in $(page_flags "$a"); do
+        for flag in ${PAGE_UNITS[$a]:-}; do
             [ "$(u_kind "$a" "$flag")$(u_on "$a" "$flag")" = tool1 ] &&
                 tools+=("$flag")
         done
@@ -1249,7 +1213,7 @@ $menu_error
 EOF
     fi
     menu_status
-    printf ' %s%s%s\n' "$c_border" "$(menu_rule "$((MENU_COLS - 1))")" "$c_reset"
+    printf ' %s%s%s\n' "$c_border" "$(printf '%*s' $((MENU_COLS - 1)) '' | tr ' ' '-')" "$c_reset"
     menu_keys
     printf ' %s%sSelect:%s ' "$c_bold" "$c_info" "$c_reset"
 }
@@ -1302,7 +1266,7 @@ menu_page_mode() {
     menu_error=""
     MENU_PAGE_WARN=""
     eng=$(menu_page_info engine)
-    if [ -n "$eng" ] && [ "$(menu_bin_get "$eng")" = link ]; then
+    if [ -n "$eng" ] && [ "$(menu_units get "$eng" bin)" = link ]; then
         menu_mode=link
         menu_link_state || true
         return
@@ -1317,13 +1281,13 @@ menu_cycle_build() {
     local eng="$1" modes cur m next="" found=0
     modes=${BUILD_MODES[$eng]:-}
     [ -n "$modes" ] || return 0
-    cur=$(menu_bin_get "$eng")
+    cur=$(menu_units get "$eng" bin)
     for m in $modes; do
         if [ "$found" = 1 ]; then next=$m; break; fi
         [ "$m" = "$cur" ] && found=1
     done
     [ -n "$next" ] || next=${modes%% *}
-    menu_bin_set "$eng" "$next"
+    menu_units set "$eng" bin "$next"
     menu_warn=""
     menu_error=""
     menu_revert_label=""
@@ -1463,7 +1427,7 @@ menu_handle() {
     if [ -n "$entry" ]; then
         IFS='|' read -r page flag kind <<< "$entry"
         case "$kind" in
-            patch) [ "$(menu_bin_get "$page")" = compile ] &&
+            patch) [ "$(menu_units get "$page" bin)" = compile ] &&
                        menu_toggle_patch_group "$page" "$flag" ;;
             tool)
                 menu_build_blocked && [ "$flag" != deps ] && return
@@ -1483,24 +1447,24 @@ menu_handle() {
 
 menu_sync() {
     local dir="$1" eng v gv f page mode v1 v2
-    [ "$dir" = import ] && menu_catalog_init
+    [ "$dir" = import ] && record_load
     for eng in "${ENGINES[@]}"; do
         v=${ENGINE_VAR[$eng]}_bin; gv=${v}_given
         if [ "$dir" = import ]; then
             mode=${!v:-${BUILD_MODES[$eng]%% *}}
             [ "$eng" = ovmf ] && [ -z "${!v:-}" ] &&
                 [ ! -f "$DIR/share/firmware/OVMF/OVMF_CODE_4M.fd" ] && mode=compile
-            menu_bin_set "$eng" "$mode"
+            menu_units set "$eng" bin "$mode"
             v=${ENGINE_VAR[$eng]}_groups; gv=${v}_given
-            menu_groups_set "$eng" "$([ "${!gv:-0}" = 1 ] &&
+            menu_units set "$eng" patch "$([ "${!gv:-0}" = 1 ] &&
                 printf '%s' "$(menu_dedupe "${!v:-}")" || default_groups "$eng")"
         else
-            printf -v "$v" '%s' "$(menu_bin_get "$eng")"
+            printf -v "$v" '%s' "$(menu_units get "$eng" bin)"
             printf -v "$gv" '%s' 1
             v=${ENGINE_VAR[$eng]}_groups; gv=${v}_given
-            printf -v "$v" '%s' "$(menu_groups_get "$eng")"
+            printf -v "$v" '%s' "$(menu_units get "$eng" patch)"
             printf -v "$gv" '%s' 1
-            if [ "$(menu_bin_get "$eng")" = link ]; then
+            if [ "$(menu_units get "$eng" bin)" = link ]; then
                 v1=${ENGINE_LINK_VAR1[$eng]:-}; v2=${ENGINE_LINK_VAR2[$eng]:-}
                 [ -n "$v1" ] && printf -v "$v1" '%s' "$(menu_link get "$eng" 1)"
                 [ -n "$v2" ] && printf -v "$v2" '%s' "$(menu_link get "$eng" 2)"
@@ -1513,7 +1477,7 @@ menu_sync() {
         [ "$libvirt_access_given" = 0 ] && libvirt_access=1
     }
     for page in host after; do
-        for f in $(page_flags "$page"); do
+        for f in ${PAGE_UNITS[$page]:-}; do
             [ "$(u_kind "$page" "$f")" = tool ] || continue
             v=$(tool_var "$f"); [ -n "$v" ] || continue
             if [ "$dir" = import ]; then
