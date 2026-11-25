@@ -1,8 +1,9 @@
+# VMM_PAGE: virt-manager
 # VMM_FLAG: pci-menu
 # VMM_NAME: PCIe hotplug submenu
 # VMM_DESC: Curated PCI redirect submenu and device picker.
-# VMM_DEPS: -
 # VMM_TICK: yes
+# VMM_INSTALL: modules/pci_redirect.py:virtManager
 --- a/virtManager/vmmenu.py
 +++ b/virtManager/vmmenu.py
 @@ -5,9 +5,12 @@

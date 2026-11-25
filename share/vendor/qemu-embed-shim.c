@@ -1,9 +1,16 @@
 /*
- * qemu-embed-shim.c - hold QEMU's X maps until virt-manager unlocks.
+ * qemu-embed-shim.c - hold QEMU's X maps until virt-manager reparents.
  *
  * Active only when VIRTMGR_HIDE_WINDOW is set.  Swallows XMapWindow and
  * XMapSubwindows, then replays them when the root property
- * _VIRTMGR_GTK_UNLOCK names one of the swallowed windows.
+ * _VIRTMGR_GTK_UNLOCK names one of the swallowed windows AND that window
+ * is no longer a direct child of the root window (i.e. virt-manager has
+ * reparented it into the console viewport).  Replaying before reparenting
+ * makes the QEMU window flash as a standalone toplevel.
+ *
+ * Reconstructed from the validated qemu-virtmgr-shim.so: the only
+ * functional difference from the original source is the XQueryTree
+ * reparent check in reader(); XCloseDisplay() is deliberately omitted.
  *
  * Build:
  *   cc -O2 -fPIC -shared -o qemu-embed-shim.so qemu-embed-shim.c \
@@ -47,9 +54,11 @@ static void *reader(void *arg)
     root = DefaultRootWindow(d);
     for (;;) {
         Atom type;
-        int fmt, found = 0;
+        int fmt;
         unsigned long n, after;
         unsigned char *p = NULL;
+        Window w = 0;
+        int matched = 0;
 
         pthread_mutex_lock(&lock);
         if (unlocked) {
@@ -58,24 +67,39 @@ static void *reader(void *arg)
         }
         pthread_mutex_unlock(&lock);
 
-        if (XGetWindowProperty(d, root, atom, 0, 1, False, AnyPropertyType,
+        if (XGetWindowProperty(d, root, atom, 0, 4, False, AnyPropertyType,
                                &type, &fmt, &n, &after, &p) == Success &&
             p && n > 0) {
-            Window w = *(Window *)p;
+            w = *(Window *)p;
             XFree(p);
             pthread_mutex_lock(&lock);
             for (int i = 0; i < nswallowed; i++) {
                 if (w && swallowed[i] == w) {
-                    unlocked = 1;
-                    found = 1;
+                    matched = 1;
                     break;
                 }
             }
             pthread_mutex_unlock(&lock);
-            if (found)
-                break;
         } else if (p) {
             XFree(p);
+        }
+
+        if (matched && w) {
+            Window qroot = 0, parent = 0, *kids = NULL;
+            unsigned int nkids = 0;
+
+            if (XQueryTree(d, w, &qroot, &parent, &kids, &nkids)) {
+                if (kids)
+                    XFree(kids);
+                /* Only replay once the window has been reparented out of
+                 * the root by virt-manager's console viewer. */
+                if (parent && parent != qroot) {
+                    pthread_mutex_lock(&lock);
+                    unlocked = 1;
+                    pthread_mutex_unlock(&lock);
+                    break;
+                }
+            }
         }
         usleep(50000);
     }
@@ -100,11 +124,10 @@ static void *reader(void *arg)
         }
         XFlush(d);
     }
-    XCloseDisplay(d);
     return NULL;
 }
 
-static int swallow(Display *d, Window w, const char *what)
+static int swallow(Display *d, Window w)
 {
     int held = 0;
 
@@ -121,9 +144,6 @@ static int swallow(Display *d, Window w, const char *what)
         held = 1;
     }
     pthread_mutex_unlock(&lock);
-    if (held)
-        fprintf(stderr, "virtmgr-shim: swallowed %s(0x%lx)\n", what,
-                (unsigned long)w);
     return held;
 }
 
@@ -131,8 +151,11 @@ int XMapWindow(Display *d, Window w)
 {
     if (!real_XMapWindow)
         real_XMapWindow = dlsym(RTLD_NEXT, "XMapWindow");
-    if (swallow(d, w, "XMapWindow"))
+    if (swallow(d, w)) {
+        fprintf(stderr, "virtmgr-shim: swallowed XMapWindow(0x%lx)\n",
+                (unsigned long)w);
         return 1;
+    }
     return real_XMapWindow(d, w);
 }
 
@@ -140,7 +163,10 @@ int XMapSubwindows(Display *d, Window w)
 {
     if (!real_XMapSubwindows)
         real_XMapSubwindows = dlsym(RTLD_NEXT, "XMapSubwindows");
-    if (swallow(d, w, "XMapSubwindows"))
+    if (swallow(d, w)) {
+        fprintf(stderr, "virtmgr-shim: swallowed XMapSubwindows(0x%lx)\n",
+                (unsigned long)w);
         return 1;
+    }
     return real_XMapSubwindows(d, w);
 }

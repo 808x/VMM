@@ -1,7 +1,7 @@
+# VMM_PAGE: qemu
 # VMM_FLAG: gtkegl
 # VMM_NAME: Re-blit and hidden-window guard
 # VMM_DESC: Fix stale frames after window swaps and focus changes.
-# VMM_DEPS: -
 # VMM_TICK: yes
 --- a/include/ui/gtk.h
 +++ b/include/ui/gtk.h

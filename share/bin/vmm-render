@@ -1,0 +1,513 @@
+#!/bin/bash
+# Render domain XML from profile.conf and share/examples/*.xml.in.
+#
+# The profile is plain bash: VMS=(fn ...), one function per VM setting
+# NAME/UUID/TEMPLATE/... globals.  Rules:
+#   1. a key the function does not set leaves its @KEY@ token untouched;
+#   2. a key set to an empty value is filled in here (UUID is generated and
+#      remembered in $PREFIX/state/domains).
+#
+# Relative DISK values are resolved against the prefix on every run, so a
+# moved tree keeps working.
+#
+# Usage:
+#   vmm-render --profile FILE --prefix DIR [--write DIR] [--define] [--list]
+#
+#   --write DIR   also write each rendered domain as DIR/<template>.xml
+#   --define      define each rendered domain with virsh, fixing name/uuid
+#                 collisions on first define
+#   --sync        update value nodes of already-defined domains from profile.conf
+#                 (identity, devices and qemu args are left untouched)
+#   --list        print one line per VM and exit
+set -u
+
+PREFIX=""
+PROFILE=""
+WRITE_DIR=""
+DEFINE=0
+SYNC=0
+LIST=0
+
+die() { printf 'vmm-render: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'vmm-render: %s\n' "$*" >&2; }
+note() { printf 'vmm-render: %s\n' "$*"; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --profile) PROFILE=${2:?--profile needs a value}; shift 2 ;;
+        --prefix) PREFIX=${2:?--prefix needs a value}; shift 2 ;;
+        --write) WRITE_DIR=${2:?--write needs a value}; shift 2 ;;
+        --define) DEFINE=1; shift ;;
+        --sync) SYNC=1; shift ;;
+        --list) LIST=1; shift ;;
+        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+if [ -z "$PREFIX" ]; then
+    # Installed at $PREFIX/bin/vmm-render.
+    PREFIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+[ -n "$PROFILE" ] || PROFILE="$PREFIX/profile.conf"
+[ -f "$PROFILE" ] || die "no profile at $PROFILE"
+[ -d "$PREFIX" ] || die "no prefix at $PREFIX"
+
+export PREFIX
+# shellcheck disable=SC1090
+. "$PROFILE" || die "cannot source $PROFILE"
+[ -n "${VMS+x}" ] || die "$PROFILE does not set VMS=()"
+[ "${#VMS[@]}" -gt 0 ] || die "$PROFILE has an empty VMS=()"
+
+STATE_DIR="$PREFIX/state"
+STATE_FILE="$STATE_DIR/domains"
+mkdir -p "$STATE_DIR" 2>/dev/null || warn "cannot create $STATE_DIR"
+
+# Remembered identities: "fn=<uuid>" and "fn.name=<name>".
+declare -A SAVED=()
+if [ -f "$STATE_FILE" ]; then
+    while IFS='=' read -r k v; do
+        [ -n "$k" ] && SAVED[$k]=$v
+    done < "$STATE_FILE"
+fi
+save_state() {
+    local k=$1 v=$2
+    [ "${SAVED[$k]:-}" = "$v" ] && return 0
+    SAVED[$k]=$v
+    printf '%s=%s\n' "$k" "$v" >> "$STATE_FILE" 2>/dev/null ||
+        warn "cannot write $STATE_FILE"
+}
+
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/vmm-render.XXXXXX") || die "mktemp failed"
+trap 'rm -rf "$tmpdir"' EXIT
+
+# Per-field state in profile.conf, so sync can honour the three-way rule:
+#   active + value   -> write to the domain
+#   active + empty   -> read from the domain, write back to profile.conf
+#   commented/absent -> do nothing
+declare -A PSTATE=()
+python3 - "$PROFILE" > "$tmpdir/profile.states" <<'PY' || die "cannot parse $PROFILE"
+import re, sys
+lines = open(sys.argv[1], encoding='utf-8').read().splitlines()
+fn = None
+for line in lines:
+    m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{', line)
+    if m:
+        fn = m.group(1)
+        continue
+    if fn and re.match(r'^\}', line):
+        fn = None
+        continue
+    if not fn:
+        continue
+    m = re.match(r'^\s*#\s*([A-Z_][A-Z0-9_]*)\s*=', line)
+    if m:
+        print('%s\t%s\tcommented' % (fn, m.group(1)))
+        continue
+    m = re.match(r'^\s*([A-Z_][A-Z0-9_]*)\s*=', line)
+    if m:
+        print('%s\t%s\tactive' % (fn, m.group(1)))
+PY
+while IFS=$'\t' read -r f k s; do
+    [ -n "$f" ] && PSTATE[$f.$k]=$s
+done < "$tmpdir/profile.states"
+
+# Rewrite one field inside one VM function of profile.conf.  Commented fields
+# are never touched by callers, but changing a previously blank field makes it
+# active for subsequent launches.
+profile_write() {
+    local fn=$1 key=$2 val=$3
+    python3 - "$PROFILE" "$fn" "$key" "$val" <<'PY' || warn "cannot update $PROFILE"
+import re, shlex, sys
+path, fn, key, val = sys.argv[1:5]
+lines = open(path, encoding='utf-8').read().splitlines()
+start = None
+for i, line in enumerate(lines):
+    if re.match(r'^%s\s*\(\)\s*\{' % re.escape(fn), line):
+        start = i
+        break
+if start is None:
+    sys.exit(0)
+end = len(lines) - 1
+for j in range(start + 1, len(lines)):
+    if re.match(r'^\}', lines[j]):
+        end = j
+        break
+pat = re.compile(r'^(\s*)(?:#\s*)?%s\s*=' % re.escape(key))
+for i in range(start + 1, end + 1):
+    m = pat.match(lines[i])
+    if m:
+        lines[i] = m.group(1) + key + '=' + shlex.quote(val)
+        break
+open(path, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+PY
+}
+
+new_uuid() {
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen
+    elif [ -r /proc/sys/kernel/random/uuid ]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        die "no uuidgen and no /proc uuid source"
+    fi
+}
+
+abspath() {
+    local p=$1
+    case "$p" in
+        /*) ;;
+        *) p="$PREFIX/$p" ;;
+    esac
+    if command -v realpath >/dev/null 2>&1; then
+        realpath -m -- "$p"
+    else
+        printf '%s\n' "$p"
+    fi
+}
+
+VIRSH="virsh -c qemu:///session"
+virsh_ok() { command -v virsh >/dev/null 2>&1 && $VIRSH list --name >/dev/null 2>&1; }
+
+# Tokens present in a template, deduplicated.
+template_tokens() {
+    grep -o '@[A-Z_][A-Z0-9_]*@' "$1" 2>/dev/null | sort -u | tr -d '@'
+}
+
+# Read a syncable value out of a domain definition.
+xml_get() {
+    local key=$1 file=$2
+    case "$key" in
+        NAME)       sed -n "s|.*<name>\([^<]*\)</name>.*|\1|p" "$file" | head -1 ;;
+        UUID)       sed -n "s|.*<uuid>\([^<]*\)</uuid>.*|\1|p" "$file" | head -1 ;;
+        MAXIMUMMEM) sed -n "s|.*<memory[^>]*>\([^<]*\)</memory>.*|\1|p" "$file" | head -1 ;;
+        CURRENTMEM) sed -n "s|.*<currentMemory[^>]*>\([^<]*\)</currentMemory>.*|\1|p" "$file" | head -1 ;;
+        EMULATOR)   sed -n "s|.*<emulator>\([^<]*\)</emulator>.*|\1|p" "$file" | head -1 ;;
+        OVMF_CODE)  sed -n "s|.*<loader[^>]*>\([^<]*\)</loader>.*|\1|p" "$file" | head -1 ;;
+        OVMF_VARS)  sed -n "s|.*<nvram template='\([^']*\)'.*|\1|p" "$file" | head -1 ;;
+        OVMF_NVRAM) sed -n "s|.*<nvram[^>]*>\([^<]*\)</nvram>.*|\1|p" "$file" | head -1 ;;
+        NETWORK_TYPE) sed -n "s|.*<interface type='\([^']*\)'>.*|\1|p" "$file" | head -1 ;;
+        MAC)        sed -n "s|.*<mac address='\([^']*\)'/>.*|\1|p" "$file" | head -1 ;;
+        NETWORK)    { sed -n "s|.*<source bridge='\([^']*\)'/>|\1|p" "$file";
+                      sed -n "s|.*<source network='\([^']*\)'/>|\1|p" "$file"; } | head -1 ;;
+        DISK)       sed -n "s|.*<source file='\([^']*\)'/>|\1|p" "$file" | head -1 ;;
+    esac
+}
+
+# Two-way sync: filled profile fields are written to the domain; blank active
+# fields are filled from the domain; commented fields are left alone.  Only
+# value nodes are rewritten, so devices and qemu:arg lines are preserved.
+sync_one() {
+    local fn="$1" name uuid xml tmp live_uuid key cur st saved
+    unset TEMPLATE NAME UUID DISK NETWORK NETWORK_TYPE
+    "$fn" || die "$fn failed"
+    name=${NAME:-}
+    uuid=${UUID:-}
+
+    # Identity: prefer the profile UUID, then a saved one, then the name.
+    if [ -z "$uuid" ] || ! $VIRSH dominfo "$uuid" >/dev/null 2>&1; then
+        saved=${SAVED[$fn]:-}
+        if [ -n "$saved" ] && $VIRSH dominfo "$saved" >/dev/null 2>&1; then
+            uuid=$saved
+        else
+            uuid=""
+        fi
+    fi
+    if [ -n "$uuid" ]; then
+        name=$($VIRSH domname "$uuid" 2>/dev/null || printf '%s' "$name")
+    elif [ -n "$name" ] && $VIRSH dominfo "$name" >/dev/null 2>&1; then
+        uuid=$($VIRSH domuuid "$name" 2>/dev/null || true)
+    else
+        name=${SAVED[$fn.name]:-${NAME:-}}
+    fi
+    if [ -z "$name" ] || ! $VIRSH dumpxml "$name" > "$tmpdir/$fn.xml" 2>/dev/null; then
+        warn "$fn: no domain to sync; run --define first"
+        return 0
+    fi
+    xml="$tmpdir/$fn.xml"; tmp="$tmpdir/$fn.new"
+    live_uuid=$($VIRSH domuuid "$name" 2>/dev/null || true)
+    [ -n "$live_uuid" ] || live_uuid=$uuid
+    if [ -n "$live_uuid" ]; then
+        save_state "$fn" "$live_uuid"
+        save_state "$fn.name" "$name"
+        # A blank active UUID is filled from the live domain.
+        if [ "${PSTATE[$fn.UUID]:-}" = active ] && [ -z "${UUID:-}" ]; then
+            profile_write "$fn" UUID "$live_uuid"
+            note "$fn: UUID filled from $name"
+        fi
+    fi
+
+    local -a pairs=()
+    add_pair() {
+        local k=$1 p=$2
+        [ "${PSTATE[$fn.$k]:-}" = active ] || return 0
+        pairs+=("$p")
+    }
+
+    for key in NAME MAXIMUMMEM CURRENTMEM EMULATOR OVMF_CODE OVMF_VARS \
+               OVMF_NVRAM NETWORK_TYPE NETWORK MAC DISK; do
+        [ "${PSTATE[$fn.$key]:-}" = active ] || continue
+        cur=${!key:-}
+        if [ -n "$cur" ]; then
+            case "$key" in
+                NAME)       add_pair "$key" "s|<name>[^<]*</name>|<name>$cur</name>|" ;;
+                MAXIMUMMEM) add_pair "$key" "s|<memory unit='KiB'>[^<]*</memory>|<memory unit='KiB'>$cur</memory>|" ;;
+                CURRENTMEM) add_pair "$key" "s|<currentMemory unit='KiB'>[^<]*</currentMemory>|<currentMemory unit='KiB'>$cur</currentMemory>|" ;;
+                EMULATOR)   add_pair "$key" "s|<emulator>[^<]*</emulator>|<emulator>$cur</emulator>|" ;;
+                OVMF_CODE)  add_pair "$key" "s|<loader[^>]*>[^<]*</loader>|<loader readonly='yes' secure='yes' type='pflash' format='raw'>$cur</loader>|" ;;
+                OVMF_VARS)  add_pair "$key" "s|template='[^']*' |template='$cur' |" ;;
+                OVMF_NVRAM) add_pair "$key" "s|<nvram\\([^>]*\\)>[^<]*</nvram>|<nvram\\1>$cur</nvram>|" ;;
+                NETWORK_TYPE) add_pair "$key" "s|<interface type='[^']*'>|<interface type='$cur'>|" ;;
+                MAC)        add_pair "$key" "s|<mac address='[^']*'/>|<mac address='$cur'/>|" ;;
+                NETWORK) case "${NETWORK_TYPE:-}" in
+                    bridge) add_pair "$key" "s|<source bridge='[^']*'/>|<source bridge='$cur'/>|" ;;
+                    network) add_pair "$key" "s|<source network='[^']*'/>|<source network='$cur'/>|" ;;
+                esac ;;
+                DISK) case "$cur" in /*) ;; *) cur=$(abspath "$cur") ;; esac
+                      add_pair "$key" "s|<source file='[^']*'/>|<source file='$cur'/>|" ;;
+            esac
+        else
+            cur=$(xml_get "$key" "$xml")
+            if [ -n "$cur" ]; then
+                profile_write "$fn" "$key" "$cur"
+                note "$fn: $key filled from $name"
+            fi
+        fi
+    done
+
+    cp "$xml" "$tmp"
+    for pair in "${pairs[@]}"; do
+        sed -i "$pair" "$tmp"
+    done
+
+    # The NIC source child exists only for bridge/network profiles.  Insert or
+    # remove it here so one template works for user, bridge and network modes.
+    if [ "${PSTATE[$fn.NETWORK_TYPE]:-}" = active ] && [ -n "${NETWORK_TYPE:-}" ]; then
+        case "${NETWORK_TYPE:-}" in
+            user)
+                sed -i "/<source bridge=/d; /<source network=/d" "$tmp"
+                ;;
+            bridge|network)
+                # passt is a user-mode backend; it is invalid for a bridged
+                # interface and makes virsh define reject the whole domain.
+                sed -i "/<backend type=/d" "$tmp"
+                if [ -n "${NETWORK:-}" ]; then
+                    if grep -q "<source ${NETWORK_TYPE}=" "$tmp"; then
+                        sed -i "s|<source ${NETWORK_TYPE}='[^']*'/>|<source ${NETWORK_TYPE}='$NETWORK'/>|" "$tmp"
+                    else
+                        sed -i "s|<interface type='[^']*'>|<interface type='$NETWORK_TYPE'>\n      <source ${NETWORK_TYPE}='$NETWORK'/>|" "$tmp"
+                    fi
+                    if [ "$NETWORK_TYPE" = bridge ]; then
+                        sed -i "/<source network=/d" "$tmp"
+                    else
+                        sed -i "/<source bridge=/d" "$tmp"
+                    fi
+                fi
+                ;;
+        esac
+    fi
+
+    if ! cmp -s "$xml" "$tmp"; then
+        $VIRSH define "$tmp" >/dev/null 2>&1 ||
+            die "$fn: failed to update domain $name"
+        note "$fn: updated $name from profile.conf"
+    else
+        note "$fn: $name unchanged"
+    fi
+}
+
+render_one() {
+    local fn=$1 tmpl=$2 out=$3
+    local line tok val name skip_disk=0 skip_nic=0
+    local -a tokens=()
+
+    # Rule 1 needs a clean slate: a stale global from the previous VM would
+    # otherwise look like "set" and leak into this domain.
+    mapfile -t tokens < <(template_tokens "$tmpl")
+    if [ "${#tokens[@]}" -gt 0 ]; then
+        for tok in "${tokens[@]}"; do
+            unset "$tok"
+        done
+    fi
+    unset TEMPLATE
+
+    "$fn" || die "profile function $fn failed"
+
+    [ -n "${NAME:-}" ] || die "$fn sets no NAME"
+    [ -n "${TEMPLATE:-}" ] || die "$fn sets no TEMPLATE"
+    [ "$TEMPLATE" = "$(basename "$tmpl")" ] || die "$fn TEMPLATE=$TEMPLATE does not match $tmpl"
+
+    # Name collisions and UUID reuse only matter when touching libvirt.
+    if [ "$DEFINE" = 1 ] && virsh_ok; then
+        if [ -n "${UUID:-}" ]; then
+            name=$($VIRSH domname "$UUID" 2>/dev/null) || name=""
+            if [ -n "$name" ] && [ "$name" != "$NAME" ]; then
+                note "$fn: uuid $UUID is already domain '$name'; keeping that name"
+                NAME=$name
+            fi
+        elif [ -n "${SAVED[$fn]:-}" ]; then
+            # A stored identity exists; trust libvirt's current name if it has one.
+            UUID=${SAVED[$fn]}
+            name=$($VIRSH domname "$UUID" 2>/dev/null) || name=""
+            if [ -n "$name" ]; then
+                NAME=$name
+            else
+                NAME=${SAVED[$fn.name]:-$NAME}
+            fi
+        else
+            UUID=$(new_uuid)
+            if $VIRSH dominfo "$NAME" >/dev/null 2>&1; then
+                local base=$NAME n=2 existing
+                existing=$($VIRSH dominfo "$base" 2>/dev/null | awk -F': *' '/^UUID:/ {print $2}')
+                if [ "$existing" = "$UUID" ]; then
+                    :
+                else
+                    while $VIRSH dominfo "$base-$n" >/dev/null 2>&1; do n=$((n + 1)); done
+                    NAME=$base-$n
+                    note "$fn: name '$base' is used by another uuid; using '$NAME'"
+                fi
+            fi
+            save_state "$fn" "$UUID"
+            save_state "$fn.name" "$NAME"
+        fi
+    else
+        if [ -z "${UUID:-}" ]; then
+            if [ -n "${SAVED[$fn]:-}" ]; then
+                UUID=${SAVED[$fn]}
+            else
+                UUID=$(new_uuid)
+                save_state "$fn" "$UUID"
+            fi
+        fi
+    fi
+
+    # Host paths that travel between machines: DISK is resolved per host.
+    if [ -n "${DISK:-}" ]; then
+        case "$DISK" in
+            /*) ;;
+            *) DISK=$(abspath "$DISK") ;;
+        esac
+        [ -e "$DISK" ] || warn "$fn: disk does not exist yet: $DISK"
+    fi
+
+    # Resolve each token once; warn once for any empty value.
+    local -A VALS=()
+    if [ "${#tokens[@]}" -gt 0 ]; then
+    for tok in "${tokens[@]}"; do
+        case "$tok" in
+            UUID) val=${UUID:-} ;;
+            NAME) val=${NAME:-} ;;
+            DISK) val=${DISK:-} ;;
+            NETWORK) val=${NETWORK:-default} ;;
+            NETWORK_TYPE) val=${NETWORK_TYPE:-network} ;;
+            NETWORK_ATTR) if [ "${NETWORK_TYPE:-network}" = bridge ]; then
+                val=bridge
+            else val=network; fi ;;
+            *) if [ -n "${!tok+x}" ]; then val=${!tok}; else continue; fi ;;
+        esac
+        if [ -z "$val" ]; then
+            [ "$tok" = DISK ] || warn "$fn: @$tok@ is empty and has no filler; left in place"
+        else
+            VALS[$tok]=$val
+        fi
+    done
+    fi
+
+    local keep_disk=1 keep_nic_source=0
+    [ -z "${DISK:-}" ] && keep_disk=0
+    case "${NETWORK_TYPE:-}" in
+        bridge|network) [ -n "${NETWORK:-}" ] && keep_nic_source=1 ;;
+    esac
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            '#DISK_BEGIN') [ "$keep_disk" = 0 ] && skip_disk=1 || skip_disk=0; continue ;;
+            '#DISK_END')   skip_disk=0; continue ;;
+            '#NIC_SOURCE_BEGIN') [ "$keep_nic_source" = 0 ] && skip_nic=1 || skip_nic=0; continue ;;
+            '#NIC_SOURCE_END')   skip_nic=0; continue ;;
+        esac
+        [ "${skip_disk:-0}" = 1 ] && continue
+        [ "${skip_nic:-0}" = 1 ] && continue
+        for tok in "${!VALS[@]}"; do
+            line=${line//@$tok@/${VALS[$tok]}}
+        done
+        printf '%s\n' "$line"
+    done < "$tmpl" > "$out"
+
+    if grep -q '@[A-Z_][A-Z0-9_]*@' "$out" 2>/dev/null; then
+        warn "$fn: unresolved tokens remain in $out"
+    fi
+    return 0
+}
+
+if [ "$SYNC" = 1 ]; then
+    command -v virsh >/dev/null 2>&1 || die "virsh not available"
+    for fn in "${VMS[@]}"; do
+        sync_one "$fn"
+    done
+    exit 0
+fi
+
+if [ "$LIST" = 1 ]; then
+    for fn in "${VMS[@]}"; do
+        unset TEMPLATE NAME UUID DISK
+        "$fn"
+        printf '%s\t%s\t%s\t%s\n' "$fn" "${NAME:-?}" "${UUID:-<generated>}" "${TEMPLATE:-?}"
+    done
+    exit 0
+fi
+
+if [ -n "$WRITE_DIR" ]; then
+    mkdir -p "$WRITE_DIR" || die "cannot create $WRITE_DIR"
+fi
+
+rc=0
+
+for fn in "${VMS[@]}"; do
+    unset TEMPLATE NAME UUID DISK
+    # Read TEMPLATE first so the output name is known before rendering.
+    "$fn" >/dev/null 2>&1 || true
+    tmplname=${TEMPLATE:-}
+    [ -n "$tmplname" ] || { warn "$fn sets no TEMPLATE; skipped"; rc=1; continue; }
+    tmpl="$PREFIX/share/examples/$tmplname"
+    [ -f "$tmpl" ] || tmpl="$PREFIX/share/examples/$(basename "$tmplname")"
+    if [ ! -f "$tmpl" ]; then
+        warn "$fn: template not found: $tmpl"; rc=1; continue
+    fi
+
+    out="$tmpdir/$(basename "${tmpl%.in}")"
+    render_one "$fn" "$tmpl" "$out" || { rc=1; continue; }
+    note "$fn: rendered ${tmpl%.in}"
+
+    if [ -n "$WRITE_DIR" ]; then
+        cp -f "$out" "$WRITE_DIR/$(basename "${tmpl%.in}")" ||
+            { warn "cannot write $WRITE_DIR/$(basename "${tmpl%.in}")"; rc=1; }
+    fi
+
+    if [ "$DEFINE" = 1 ]; then
+        if ! command -v virsh >/dev/null 2>&1; then
+            warn "$fn: virsh not available; not defined"; rc=1; continue
+        fi
+        existing_uuid=""
+        if [ -n "${UUID:-}" ]; then
+            existing_uuid=$($VIRSH domuuid "$UUID" 2>/dev/null || true)
+        fi
+        [ -n "$existing_uuid" ] || existing_uuid=$($VIRSH domuuid "$NAME" 2>/dev/null || true)
+        if [ -n "$existing_uuid" ]; then
+            # Never redefine a domain that is already present: its live
+            # devices (notably the disk) are authoritative.
+            note "$fn: ${NAME:-domain} already defined; keeping it"
+            UUID=$existing_uuid
+        elif $VIRSH define "$out" >/dev/null 2>&1; then
+            note "$fn: defined ${NAME:-domain}"
+        else
+            warn "$fn: virsh define failed"; rc=1
+        fi
+        # Record the real identity in the profile; the next launch syncs
+        # against this UUID instead of regenerating one.
+        if [ -n "${UUID:-}" ] && [ "${PSTATE[$fn.UUID]:-}" = active ]; then
+            profile_write "$fn" UUID "$UUID"
+        fi
+    fi
+done
+
+exit "$rc"

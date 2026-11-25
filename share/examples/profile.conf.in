@@ -21,8 +21,14 @@
 QEMU_GTK_REFRESH_RATE=60
 #VK_DRIVER_FILES=/usr/share/vulkan/icd.d/your_driver.json
 
-# NVRAM lives outside the prefix; override with VMM_NVRAM when needed.
+# Host paths: override with VMM_NVRAM when the tree moves.
 NVRAM_DIR="${VMM_NVRAM:-/var/lib/libvirt/qemu/nvram}"
+
+# Libvirt network for the guest NIC.  Empty means no network interface;
+# unset defaults to libvirt's "default" network when it is active.
+# Optional network overrides; each VM function applies them.
+NETWORK_DEFAULT="${VMM_NETWORK:-}"
+NETWORK_TYPE_DEFAULT="${VMM_NETWORK_TYPE:-user}"
 
 # One function per VM.  This order is the render order.
 VMS=(vm_cachyos vm_windows)
@@ -31,11 +37,14 @@ vm_cachyos() {
     NAME="CachyOS"
     UUID=""
     TEMPLATE="cachyos.xml.in"
-    OVMF_CODE="$PREFIX/firmware/OVMF/OVMF_CODE_4M.fd"
-    OVMF_VARS="$PREFIX/firmware/OVMF/OVMF_VARS_4M.fd"
+    OVMF_CODE="$PREFIX/firmware/OVMF/OVMF_CODE_4M.ms.fd"
+    OVMF_VARS="$PREFIX/firmware/OVMF/OVMF_VARS_4M.ms.fd"
     OVMF_NVRAM="$NVRAM_DIR/CachyOS_VARS.fd"
     EMULATOR="$PREFIX/bin/vmm-qemu"
-    #DISK="../VHD/CachyOS.qcow2"
+    NETWORK="$NETWORK_DEFAULT"
+    NETWORK_TYPE="$NETWORK_TYPE_DEFAULT"
+    MAC="52:54:00:fb:f5:c0"
+    #DISK="/path/to/CachyOS.qcow2"
     CURRENTMEM="$CURRENTMEM_VM1"
     MAXIMUMMEM="$MAXIMUM_MEM"
 }
@@ -48,7 +57,10 @@ vm_windows() {
     OVMF_VARS="$PREFIX/firmware/OVMF/OVMF_VARS_4M.ms.fd"
     OVMF_NVRAM="$NVRAM_DIR/Windows_VARS.fd"
     EMULATOR="$PREFIX/bin/vmm-qemu"
-    #DISK="../VHD/Windows 11.qcow2"
+    NETWORK="$NETWORK_DEFAULT"
+    NETWORK_TYPE="$NETWORK_TYPE_DEFAULT"
+    MAC="52:54:00:78:61:b5"
+    #DISK="/path/to/Windows 11.qcow2"
     CURRENTMEM="$CURRENTMEM_VM2"
     MAXIMUMMEM="$MAXIMUM_MEM"
 }
@@ -58,21 +70,21 @@ vm_windows() {
 GIB=1048576
 MEM_SLACK=1000
 HOST_RESERVE=$(( (GIB + MEM_SLACK) * 2 ))
+# Cap guest RAM well below physical RAM: venus/blob add shared host pages.
+GUEST_CAP=$(( 8 * GIB ))
 TOTAL_MEM=$(free -k | awk '/^Mem:/ {print $2}')
 
 # VM1 ceiling: half the host minus a host reserve, 4 GiB floor.
-if (( TOTAL_MEM/2 - (GIB + MEM_SLACK) > 4*GIB )); then
-    CURRENTMEM_VM1=$(( TOTAL_MEM/2 - GIB ))
-else
-    CURRENTMEM_VM1=$(( 4*GIB ))
-fi
+CURRENTMEM_VM1=$(( TOTAL_MEM/2 - GIB ))
+[ "$CURRENTMEM_VM1" -gt "$GUEST_CAP" ] && CURRENTMEM_VM1=$GUEST_CAP
+[ "$CURRENTMEM_VM1" -lt "$((4*GIB))" ] && CURRENTMEM_VM1=$((4*GIB))
 
 # VM2 ceiling: same rule, smaller fallback.
-if (( TOTAL_MEM/2 - (GIB + MEM_SLACK) > 4*GIB )); then
-    CURRENTMEM_VM2=$(( TOTAL_MEM/2 - GIB ))
-else
-    CURRENTMEM_VM2=$(( (TOTAL_MEM - (4*GIB - 1)) / 2 - GIB ))
-fi
+CURRENTMEM_VM2=$(( TOTAL_MEM/2 - GIB ))
+[ "$CURRENTMEM_VM2" -gt "$GUEST_CAP" ] && CURRENTMEM_VM2=$GUEST_CAP
+[ "$CURRENTMEM_VM2" -lt "$((4*GIB))" ] && CURRENTMEM_VM2=$((4*GIB))
 
 # Shared maximum that both VMs may never exceed.
-MAXIMUM_MEM=$(( TOTAL_MEM - HOST_RESERVE ))
+MAXIMUM_MEM=$CURRENTMEM_VM1
+[ "$CURRENTMEM_VM2" -gt "$MAXIMUM_MEM" ] && MAXIMUM_MEM=$CURRENTMEM_VM2
+true

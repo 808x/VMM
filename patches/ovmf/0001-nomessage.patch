@@ -1,3 +1,4 @@
+# VMM_PAGE: ovmf
 # VMM_FLAG: nomessage
 # VMM_NAME: Failure-only BdsDxe messages
 # VMM_DESC: Print boot messages only when something fails.

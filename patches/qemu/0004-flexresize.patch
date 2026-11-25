@@ -1,3 +1,4 @@
+# VMM_PAGE: qemu
 # VMM_FLAG: flexresize
 # VMM_NAME: Host-driven guest resolution
 # VMM_DESC: Resize the guest display from the host over vmport.

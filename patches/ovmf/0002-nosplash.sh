@@ -1,19 +1,11 @@
 #!/bin/bash
-# Blank the OVMF logo BMP in place.
-#
-# usage: patches/ovmf/nosplash.patch EDK2_SRC
-#
-# Truncates the palette and pixel data while keeping the BMP headers, so
-# every index maps to black and the TianoCore splash stays blank regardless
-# of the upstream image or palette.
-#
+# VMM_PAGE: ovmf
 # VMM_FLAG: nosplash
 # VMM_NAME: Blank TianoCore splash
 # VMM_DESC: Replace the logo with a blank image.
-# VMM_DEPS: -
 # VMM_TICK: yes
 set -eu
-TREE="${1:?usage: nosplash.patch EDK2_SRC}"
+TREE="${1:?usage: nosplash.sh EDK2_SRC}"
 LOGO="$TREE/MdeModulePkg/Logo/Logo.bmp"
 [ -f "$LOGO" ] || { echo "nosplash.patch: $LOGO not found" >&2; exit 1; }
 size=$(stat -c %s "$LOGO")

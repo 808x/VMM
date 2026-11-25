@@ -1,177 +1,220 @@
-# VMM-git
+<p align="center"><img src="assets/vmm-mark.svg" width="140" alt="VMM mark"></p>
+<h1 align="center">VMM</h1>
+<p align="center">A portable, self-contained virt-manager desktop with a patched QEMU display stack — one VM for CachyOS with <code>virtio-vga-gl</code>/venus, one for Windows with <code>vmvga</code> and DXVK.</p>
 
-Portable packaging of the virt-manager fork and its QEMU display stack.
+<p align="center"><img src="assets/screenshots/01-console.svg" width="100%" alt="VMM console with an embedded QEMU GTK window"></p>
 
-The package is source plus patches. It pulls upstream at a recorded lock,
-applies a small additive series, and installs a self-contained prefix with
-QEMU, virglrenderer, dxvk-native, firmware and launchers. Disks, rendered
-domain XML, Python libraries and host globals are not part of the build.
+---
+
+## Screens
+
+The images below are placeholders. Drop real screenshots into `assets/screenshots/` under the same names, or point the `<img>` tags at your own captures.
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/02-pcie-menu.svg" alt="PCIe hotplug menu"><br><b>PCIe hotplug</b>: a curated submenu for redirecting host PCI devices into a stopped guest, including a picker that hides boot and mounted devices.</td>
+    <td width="50%"><img src="assets/screenshots/03-usb-menu.svg" alt="USB hotplug menu"><br><b>USB hotplug</b>: a submenu backed by a device cache that works around spice-gtk's GI ownership bug.</td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/04-cachyos-gl.svg" alt="CachyOS with virtio-vga-gl"><br><b>CachyOS</b>: virtio-vga-gl with venus/blob globals and a GL console embedded in the detail window.</td>
+    <td><img src="assets/screenshots/05-windows-vmvga.svg" alt="Windows with vmvga"><br><b>Windows</b>: vmvga with DXVK, host-driven resolution and a reparented GTK display, with SPICE channels kept for USB and the agent.</td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="assets/screenshots/06-installer.svg" alt="Installer menu"><br><b>Installer</b>: a six-page terminal menu (QEMU, OVMF, virt-manager, host, after, review). Every row is backed by a flag, and the review page shows the exact command line.</td>
+  </tr>
+</table>
+
+---
+
+## What it is
+
+VMM is not a disk image and not a distro. It is **source plus patches**: a set of pinned upstream checkouts, an additive patch series, and a small installer that assembles them into a relocatable prefix. Nothing personal is baked into the templates — disks, UUIDs and host paths are filled in locally.
+
+The two supplied profiles are meant to be edited, not treated as appliances. They start with sane virtual hardware (virtio NIC, balloon, RNG, xHCI, virtio inputs) and no hardcoded guest PCI addresses, so libvirt assigns topology at define time.
+
+Everything runs against **session libvirt** (`qemu:///session`); no system-wide domain is created or modified.
+
+## Highlights
+
+- **Modular metadata**: patches and tools declare their own `VMM_*` header fields. `tools/build.sh --list` emits a single ten-column record per item; adding a file changes the menu and CLI without editing the orchestrator.
+- **Two-way profile sync**: `profile.conf` is the source of truth for values. A filled field is written to the domain, a blank active field is filled from the domain, and a commented field is ignored.
+- **Session-only, no sudo to launch**: `launch.sh` re-execs as the invoking user when started under sudo, then synchronises the profile and starts virt-manager.
+- **Relocatable prefix**: move the tree and the launchers, library paths and firmware follow it.
+- **Reproducible inputs**: upstream URLs, minimum versions and exact locks live in `tools/upstreams.conf`; patch stamps are hashes of patch contents, so edits invalidate a build.
+
+---
 
 ## Quick start
 
+Build everything from source:
+
 ```sh
-./install.sh                         # build menu on a terminal
-./install.sh --dry-run --virtmgr:bin=compile --qemu:bin=compile
-./install.sh --virtmgr:bin=compile --qemu:bin=compile
+./install.sh --qemu:bin=compile --qemu:patch=gtkegl,spicevirgl,vmvga,flexresize \
+             --virtmgr:bin=compile --virtmgr:patch=pci-menu,reparent,usb-cache,usb-menu \
+             --ovmf:bin=compile --ovmf:patch=nomessage,nosplash \
+             --tool=libvirt-access,write-xml,verify,desktop-item
+```
+
+Then launch the desktop:
+
+```sh
 ./prefix/launch.sh
 ```
 
-To start from source, use the bootstrap. It fetches the `main` branch
-archive, stores it as `src/main.tar.gz`, and lays out a tidy tree (default
-`./VMM`):
+With no component flags, `./install.sh` opens the terminal menu. Resolve everything without changing anything:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/808x/VMM/main/get.sh |
-    bash -s -- --target ~/apps/VMM --run
+./install.sh --dry-run --qemu:bin=compile --virtmgr:bin=compile --ovmf:bin=compile
 ```
 
-The result is four visible entries:
+Use `--prefix=DIR` to install somewhere other than `./prefix`.
 
+---
+
+## Usage
+
+### The desktop
+
+- The first install defines each domain from its template **once**, then writes the real UUID back into `profile.conf`. Existing domains are never redefined, so their disks and device topology stay yours.
+- Each launch runs `vmm-render --sync` against session libvirt before starting virt-manager. It updates only value nodes — memory, emulator, firmware paths, MAC, NIC and disk source — preserving identity, devices and `qemu:arg` lines.
+- Set `VMM_NO_SYNC=1` to skip the sync step.
+
+### `profile.conf`
+
+The profile is plain bash: global settings plus one function per VM. Three states matter:
+
+```bash
+vm_windows() {
+    NAME="Windows"                 # filled  -> written to the domain
+    UUID=""                        # blank   -> read from the domain, written back here
+    MAC="52:54:00:78:61:b5"        # filled  -> kept in sync with the guest NIC
+    #DISK="/path/to/Windows.qcow2" # commented -> ignored; attach the disk yourself
+}
 ```
-VMM/
-  get.sh          copy of the bootstrap
-  install.sh      -> src/install.sh
-  src/            main.tar.gz plus the unpacked source
-  prefix/         created by install.sh
-```
 
-`get.sh` prefers symlinks and copies the two front scripts when the
-filesystem does not support them (NTFS, SMB2). `--branch`, `--url` and
-`VMM_BASE_URL` select another source; for offline installs put
-`main.tar.gz` beside the script or set `VMM_TARBALL`. When `--sha256`,
-`VMM_SHA256` or an adjacent `.sha256` is supplied the archive must match;
-otherwise the computed hash is printed so it can be pinned. `--force`
-refreshes `src/` and the front links in an existing tree. `--run` starts
-`install.sh` afterwards and passes any remaining arguments to it.
+Fields that travel today: `NAME`, `UUID`, `CURRENTMEM`, `MAXIMUMMEM`, `EMULATOR`, `OVMF_CODE`, `OVMF_VARS`, `OVMF_NVRAM`, `NETWORK_TYPE`, `NETWORK`, `MAC` and `DISK`.
 
-`--prefix=DIR` changes the install location (default `./prefix`).
-`./prefix/launch.sh` launches the installed prefix; it is generated by
-`install.sh`, so there is no launcher to edit in the source tree.
+The template pair (`share/examples/*.xml.in`) contains no guest-side addresses and no disk device. `#NIC_SOURCE_BEGIN`/`#NIC_SOURCE_END` make the NIC source conditional, so the same template works with `user`, `bridge` and `network` modes. The PCIe hotplug menu owns GPU assignment at runtime, so no `hostdev` is baked in.
 
-On a terminal with no component flags, the installer opens a six-page
-menu: QEMU, OVMF, VIRT-MGR, HOST, AFTER and REVIEW. Available keys are the
-only keys handled: `[A-X]` select an item and `[1-6]` jump to a page.
-`Ctrl+C` quits at any time, and Enter builds from REVIEW. On component
-pages `A` cycles the binary mode and `B`-`E` toggle patch groups (OVMF uses
-`B`-`C`); HOST uses `A`-`C` and AFTER uses `A`-`D` for their options.
-
-Choosing a link mode narrows the key bar to `A` (select the next option)
-and `/` (set or override the path); `[1-6]` stays available unless a path
-error blocks progress. Pressing `A` cycles to the next item and returns to
-the normal key bar. OVMF walks CODE then VARS. A missing linked path is
-a persistent `[X] ERROR: Cannot proceed, fix path to <name> binary or
-select another option`: it hides the page keys and survives page changes
-while that link option stays selected. An invalid edit that has a
-usable fallback adds `[!] WARNING: Invalid path, reverting to found <name>
-binary`; a warning can coexist with an error and may clear after a later
-change. The `[!]`/`[X]` prefix is bold; a reverted `Found:` line turns
-yellow, `Not found:` is red, and both return to green/absent on a fresh
-option change. Sudo access is obtained once
-through sudo's own prompt when a privileged step is selected; the menu never
-reads or stores a password. Each row has a one-line description, and REVIEW
-shows the exact equivalent command. Patch rows and link paths appear only
-for the active mode. Every flag sits on its own line, and the marker star
-and flag `=` share a column at the right edge of the frame.
-
-Component flags:
+### Command line
 
 ```sh
 ./install.sh --qemu:bin=compile|skip|link:/path/to/qemu-system-x86_64
-./install.sh --qemu:patch=vmvga,spicevirgl,gtkegl,flexresize
+./install.sh --qemu:patch=gtkegl,spicevirgl,vmvga,flexresize
 ./install.sh --ovmf:bin=pull|compile|link|skip
-./install.sh --ovmf:code=/usr/share/OVMF/OVMF_CODE_4M.fd \
-             --ovmf:vars=/usr/share/OVMF/OVMF_VARS_4M.fd
-./install.sh --ovmf:patch=nosplash,nomessage
+./install.sh --ovmf:code=PATH --ovmf:vars=PATH
+./install.sh --ovmf:patch=nomessage,nosplash
 ./install.sh --virtmgr:bin=compile|skip|link:/usr/bin/virt-manager
-./install.sh --virtmgr:patch=pcimenu,usbcache,usbmenu,reparent
-./install.sh --deps:install
-./install.sh --deps:runtime
-./install.sh --after:clean=sources|deps|all|none
-./install.sh --after:misc=verify,launchitem
-./install.sh --sessionvfio          # host-global helper + udev/sudoers
-./install.sh --writexml             # render share/examples/*.xml
+./install.sh --virtmgr:patch=pci-menu,reparent,usb-cache,usb-menu
+./install.sh --tool=deps,session-vfio,write-xml,libvirt-access,verify,desktop-item,clean-sources
 ./install.sh --list-patches
-./install.sh --update               # re-resolve upstream locks
+./install.sh --dry-run
+./install.sh --update                 # resolve new upstream locks
 ```
 
-Patch values accept either the compact menu names (`spicevirgl`,
-`flexresize`, `nosplash`) or the manifest names (`spice-virgl`,
-`resolution`, `logo`). An empty `--qemu:patch=`, `--ovmf:patch=` or
-`--virtmgr:patch=` means no patches.
+Patch names are the flag names from `--list-patches`. An empty `--*:patch=` means no patches. Dependencies are emitted topologically, so flag order does not matter.
 
-`--deps:install` installs the build toolchain and development headers; it
-records packages that were not already installed in `state/new-deps`.
-`--deps:runtime` installs only what the finished prefix loads at run time
-(GTK3, python3-gi, libvirt daemon and client, spice-gtk, Vulkan, SDL/GLFW)
-and records them in `state/new-runtime-deps`. On the HOST page, option `A`
-installs both sets in one sudo-gated step; if they are left missing, HOST
-warns about runtime packages, AFTER warns about build packages, and REVIEW
-warns about both. AFTER > Cleanup option `A`, "Remove build dependencies", is
-off by default and sudo-gated; enabling it removes build-only packages after
-the build while runtime dependencies are always kept. `--after:clean=deps`
-does the same without prompting, and `--after:clean=none` keeps everything.
+---
 
-On a terminal the menu fills in choices that flags did not supply. A run is
-fully unattended when all three `*:bin` choices and `--after:clean` are
-specified.
+## What is included
 
-```sh
-./install.sh --virtmgr:bin=compile --qemu:bin=compile \
-    --ovmf:bin=pull --deps:install --after:clean=none
-```
+### QEMU patches
 
-Firmware comes from `share/firmware/OVMF` by default (`--ovmf:bin=pull`).
-`--ovmf:bin=compile` rebuilds it from the edk2 snapshot in the QEMU tarball
-with `tools/build-ovmf.sh` (adds a few minutes) and does not require a QEMU
-build; `--ovmf:bin=link` installs symlinks to an existing CODE/VARS pair;
-`--ovmf:bin=skip` installs none.
+| Flag | What it does |
+| --- | --- |
+| `gtkegl` | Re-blit on focus arrival and skip EGL swaps on hidden windows, so a reparented or unmapped GL console does not wedge. |
+| `spicevirgl` | Exempt the SPICE display channel from the GL compatibility probe, keeping agent, USB and clipboard channels alive alongside a GL console. |
+| `vmvga` | Merge the qemu-vmvga overlay: VMware SVGA 3D with host-side DXVK rendering and the vmport RPC extensions it needs. |
+| `flexresize` | Host-driven guest resolution: `disp-width`/`disp-height` properties, topology registers and bounded `Resolution_Set` delivery over the TCLO channel. Depends on `vmvga`; it patches the overlay tree, not upstream QEMU. |
+
+### virt-manager patches
+
+| Flag | What it does |
+| --- | --- |
+| `pci-menu` | Curated PCIe hotplug submenu and device picker that excludes boot displays and mounted filesystems. |
+| `reparent` | Embeds QEMU's GTK window into the console viewport with a zero-flicker X shim; keeps SPICE for non-video channels. |
+| `usb-cache` | Caches USB device state to work around the spice-gtk GI ownership bug. |
+| `usb-menu` | USB hotplug submenu; pulls in `usb-cache`. |
+
+### OVMF patches
+
+| Flag | What it does |
+| --- | --- |
+| `nomessage` | Print BdsDxe messages only on failure. |
+| `nosplash` | Replace the TianoCore splash with a blank image. |
+
+### Host and post-install tools
+
+| Page | Flag | What it does |
+| --- | --- | --- |
+| host | `deps` | Install build and runtime packages (sudo). |
+| host | `session-vfio` | Install the opt-in root helper, udev rule and sudoers entry for session-mode VFIO. |
+| host | `write-xml` | Render the example domains into the prefix. |
+| host | `libvirt-access` | AppArmor rules, prefix ownership and parent traversal for libvirtd. |
+| after | `verify` | Check launcher, QEMU and firmware paths. |
+| after | `desktop-item` | Write `vmm.desktop` so the app appears in the desktop menu. |
+| after | `clean-sources` | Delete the source cache and build outputs. |
+| after | `clean-deps` | Remove build-only packages; runtime packages are kept. |
+
+---
 
 ## Layout
 
+Source tree:
+
 ```
-install.sh              orchestration, deps, fetch, build, launchers
-tools/                  patch application, QEMU profile build, audits
-tools/upstreams.conf    pinned upstream URLs, floors and locks
-tools/relocate-prefix.sh  strip build-time paths after install
-patches/                manifest and patch groups
-patches/ovmf/           silent-boot source changes and blank logo
-share/examples/          domain templates; host.local holds local overrides
-share/firmware/OVMF/     bundled silent-boot OVMF images
-tools/build-ovmf.sh      rebuild the firmware from QEMU's edk2 snapshot
-tools/vmm-vfio-ctl       opt-in root helper for session-mode vfio
-share/vendor/            qemu-embed shim source + provenance
-src/                     upstream source checkouts (runtime)
-build/                   downloads and build outputs (runtime)
-state/                   package tallies written by --deps:install/--deps:runtime
+install.sh              orchestration, flags, TUI
+tools/build.sh          patch discovery/order, engine builds, dxvk staging
+tools/upstreams.conf    pinned URLs, floors and locks
+patches/                one directory per engine; metadata in file headers
+share/examples/         profile.conf.in and the two domain templates
+share/bin/              vmm-qemu, vmm-render
+share/vendor/           dxvk-native prebuilt tarball, embed shim source
+share/firmware/OVMF/    bundled firmware
+src/ build/ state/      runtime caches (not part of the shipped package)
 ```
 
-Install prefix:
+Installed prefix:
 
 ```
 prefix/
-  bin/virt-manager       patched fork
-  bin/vmm-qemu           libvirt emulator launcher
-  share/virt-manager     Python application
-  qemu/bin               upstream QEMU 11.1.3 + patches
-  qemu/lib               virglrenderer 1.3.0 + dxvk-native 3.1.1
-  qemu/libexec           virgl_render_server
-  firmware/OVMF          silent-boot firmware and VARS
-  state/ run/            runtime, kept across restarts
-  launch.sh              launcher
+  launch.sh
+  profile.conf              local values; edited by sync on blank fields
+  bin/virt-manager          patched fork
+  bin/vmm-qemu              libvirt emulator wrapper
+  bin/vmm-render            template renderer and two-way sync
+  bin/qemu-system-x86_64    QEMU 11.1.3 + patches
+  lib/                      virglrenderer + dxvk-native 3.1.1 (prebuilt)
+  libexec/                  virgl_render_server, qemu-embed-shim.so
+  firmware/OVMF/            OVMF CODE/VARS
+  share/examples/           rendered domain XML
+  state/ run/               UUID state and runtime files
 ```
-
-The prefix is relocatable: moving or renaming the surrounding directory
-does not change the installed paths. `install.sh` rewrites the few
-upstream build-time paths via `tools/relocate-prefix.sh`.
 
 ## Requirements
 
-Host: Linux with KVM, libvirt, Python 3 + PyGObject, GTK3, spice-gtk,
-X11 or XWayland, a Vulkan ICD. Build additionally needs meson, ninja, a C
-compiler, GTK3/SPICE/virgl headers. `--deps:install` covers Arch, Debian
-and Fedora families; without it the installer lists what is missing.
+Linux with KVM, libvirt (session daemon), Python 3 + PyGObject, GTK3, spice-gtk, X11 or XWayland and a Vulkan ICD. Building additionally needs meson, ninja, a C/C++ compiler, pkg-config and the GTK/SPICE/virgl development headers. `--tool=deps` covers Debian and Fedora families; without it the installer reports what is missing.
 
-## Status
+## Reproducibility
 
-Windows and CachyOS domains are the supported profiles. Patch locks and
-per-group upstream status live in `tools/upstreams.conf` and `patches/manifest`.
+- Upstream locks (QEMU 11.1.3, virt-manager v5.1.0, vmvga `d5bb723f…`, virglrenderer `18dbf187…`, dxvk-native v3.1.1) are in `tools/upstreams.conf`.
+- Patch/tool records are declared in leading `VMM_*` comment headers: `VMM_PAGE`, `VMM_FLAG`, `VMM_NAME`, `VMM_DESC`, optional `VMM_DEPS`, `VMM_TICK`, `VMM_SUDO`, `VMM_POST`, `VMM_SOURCE`, `VMM_INSTALL`.
+- `NNNN-name` files are read in `LC_ALL=C` order; that order is execution order.
+- The patched-tree stamp is an md5 of patch contents, not of flag names, so editing a patch invalidates it.
+
+---
+
+## License
+
+VMM is free software under the [GNU GPL v2 or later](LICENSE). Third-party components keep their own licenses.
+
+## Credits
+
+- **[QEMU](https://www.qemu.org/)** — GPL-2.0-or-later. Emulator and OVMF/edk2 snapshot.
+- **[virt-manager](https://virt-manager.org/)** — GPL-2.0-or-later. Base of the patched fork.
+- **[qemus/qemu-vmvga](https://github.com/qemus/qemu-vmvga)** — the VMware SVGA 3D overlay and vmport extensions.
+- **[doitsujin/dxvk](https://github.com/doitsujin/dxvk)** — zlib/libpng license. The prebuilt dxvk-native 3.1.1 libraries used by the vmvga D3D path.
+- **[virgl/virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer)** — MIT. Venus/virgl support for the CachyOS GL console.
+- **EDK II / OVMF** — BSD-2-Clause-Patent. Firmware images and the silent-boot patches.
+
+VMM is an independent project and is not affiliated with QEMU, virt-manager, Red Hat or the dxvk authors.

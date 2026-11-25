@@ -1,8 +1,9 @@
+# VMM_PAGE: virt-manager
 # VMM_FLAG: reparent
 # VMM_NAME: X11/XWayland reparenting
 # VMM_DESC: Embed the QEMU GTK window inside the virt-manager console.
-# VMM_DEPS: -
 # VMM_TICK: yes
+# VMM_INSTALL: modules/gtk_embed.py:virtManager/details
 --- a/virtManager/details/console.py
 +++ b/virtManager/details/console.py
 @@ -7,12 +7,14 @@

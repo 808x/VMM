@@ -1,0 +1,19 @@
+#!/bin/bash
+# Relocate prefix JSON assets after a manual move.  Idempotent.
+set -u
+PREFIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Firmware descriptors: collapse baked paths to relative
+fwdir="$PREFIX/qemu/share/qemu/firmware"
+if [ -d "$fwdir" ]; then
+    sed -i -E 's#("(filename|template)": ").*/qemu/share/qemu/#\1../#' \
+        "$fwdir"/*.json 2>/dev/null || true
+fi
+
+# vhost-user helpers: bare binary name (launcher puts libexec in PATH)
+vh="$PREFIX/qemu/share/qemu/vhost-user"
+if [ -d "$vh" ]; then
+    sed -i -E 's#("binary": ").*/#\1#' "$vh"/*.json 2>/dev/null || true
+fi
+
+exit 0

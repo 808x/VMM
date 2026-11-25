@@ -1,12 +1,9 @@
 #!/bin/bash
-# VMM installer. See README.md.
 # No -e: actions are checked explicitly with || die.
 set -u
 SELF="${BASH_SOURCE[0]}"
 SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 ROOT="$SELF_DIR"
-# get.sh lays out ROOT/{install.sh -> src/install.sh, src/, prefix/}. Follow
-# the link to the code root, but keep ROOT as the install root. A copied
 # install.sh (no symlink support) is detected by the sibling src/tools.
 if [ -L "$SELF" ] && command -v readlink >/dev/null 2>&1; then
     DIR="$(cd "$(dirname "$(readlink -f "$SELF")")" && pwd)"
@@ -15,12 +12,10 @@ elif [ -d "$SELF_DIR/src/tools" ] && [ ! -d "$SELF_DIR/tools" ]; then
 else
     DIR="$SELF_DIR"
 fi
-MANIFEST="$DIR/patches/manifest"
 CONF="$DIR/tools/upstreams.conf"
 BUILD="${VMM_BUILD_DIR:-$DIR/build}"
 STATE="${VMM_STATE_DIR:-$DIR/state}"
 DEPS_STATE="$STATE/new-deps"
-RUNTIME_STATE="$STATE/new-runtime-deps"
 DL="$BUILD/downloads"
 SRC="${VMM_SRC_DIR:-$DIR/src}"
 
@@ -44,23 +39,22 @@ ovmf_groups=""
 ovmf_bin_given=0
 ovmf_groups_given=0
 install_deps=0
-runtime_deps=0
 host_deps=0
 session_vfio=0
+libvirt_access=1
+libvirt_access_given=0
 emit_domains=0
 verify=0
 launchitem=0
 update=0
 dry_run=0
 list=0
-clean_mode=""
+clean_sources=0
+clean_deps=0
 clean_given=0
 misc_given=0
-no_clean=0
 prefix="$ROOT/prefix"
-# If a prefix already lives next to the installer, run from inside it; if the
 # tree was copied (no symlinks) the prefix may instead be under src/.  All path
-# variables above are absolute, so this chdir is safe.
 if [ -d "$SELF_DIR/prefix" ]; then
     cd "$SELF_DIR/prefix"
 elif [ -d "$SELF_DIR/src/prefix" ]; then
@@ -68,8 +62,6 @@ elif [ -d "$SELF_DIR/src/prefix" ]; then
 fi
 jobs="$(nproc 2>/dev/null || echo 4)"
 dxvk_tarball="${DXVK_NATIVE_TARBALL:-}"
-# Key→flag lookup for dynamic patch menus, rebuilt on each render.
-declare -A MENU_KEY_TO_FLAG
 
 menu_color=0
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
@@ -128,68 +120,26 @@ else
     c_reset=""
 fi
 
-# Build output filtering: collapse repetitive lines sharing the same prefix.
-# Threshold = consecutive lines before collapsing (default 4).
-# Prefix length = characters to compare (default 12).
-FILTER_THRESHOLD="${VMM_FILTER_THRESHOLD:-4}"
-FILTER_PREFIX_LEN="${VMM_FILTER_PREFIX_LEN:-12}"
-FILTER_ENABLED="${VMM_FILTER_ENABLED:-1}"
 
-# Compiler diagnostic flags (non-intrusive: affect output only, not codegen).
-# -Wno-error: warnings non-fatal
-# -Wno-macro-redefined: silence D3D8/D3D9 macro collisions (DXVK)
-# Override via VMM_CFLAGS/VMM_CXXFLAGS env vars (e.g. "" to use project defaults).
-VMM_DIAG_FLAGS="-Wno-error -Wno-macro-redefined"
-if [ -n "${VMM_CFLAGS+x}" ] && [ -n "$VMM_CFLAGS" ]; then
-    VMM_CFLAGS="$VMM_CFLAGS $VMM_DIAG_FLAGS"
-else
-    VMM_CFLAGS="$VMM_DIAG_FLAGS"
-fi
-if [ -n "${VMM_CXXFLAGS+x}" ] && [ -n "$VMM_CXXFLAGS" ]; then
-    VMM_CXXFLAGS="$VMM_CXXFLAGS $VMM_DIAG_FLAGS"
-else
-    VMM_CXXFLAGS="$VMM_DIAG_FLAGS"
-fi
-export VMM_CFLAGS VMM_CXXFLAGS
+PAGES=(
+    "1|QEMU|qemu"
+    "2|OVMF|ovmf"
+    "3|VIRT-MGR|virt-manager"
+    "4|HOST|host"
+    "5|AFTER|after"
+    "6|REVIEW|review"
+)
 
-filter_output() {
-    # Usage: command | filter_output
-    # Collapses consecutive lines sharing the same leading prefix.
-    # Output format: first_line \n [... N collapsed] last_line
-    local threshold="${FILTER_THRESHOLD:-4}"
-    local prefix_len="${FILTER_PREFIX_LEN:-12}"
-    local enabled="${FILTER_ENABLED:-1}"
-    [ "$enabled" = 1 ] || { cat; return; }
-
-    local line prefix count=0 last_prefix="" group=()
-    while IFS= read -r line; do
-        prefix="${line:0:prefix_len}"
-        if [ "$prefix" = "$last_prefix" ] && [ -n "$prefix" ]; then
-            count=$((count + 1))
-            group+=("$line")
-            continue
-        else
-            if [ "$count" -ge "$threshold" ] && [ ${#group[@]} -gt 0 ]; then
-                echo "${group[0]}"
-                echo "[... $((count - 1)) collapsed] ${group[-1]}"
-            elif [ "$count" -gt 0 ]; then
-                printf '%s\n' "${group[@]}"
-            fi
-            count=1
-            last_prefix="$prefix"
-            group=("$line")
-        fi
-    done
-    if [ "$count" -ge "$threshold" ] && [ ${#group[@]} -gt 0 ]; then
-        echo "${group[0]}"
-        echo "[... $((count - 1)) collapsed] ${group[-1]}"
-    elif [ "$count" -gt 0 ]; then
-        printf '%s\n' "${group[@]}"
-    fi
-}
+declare -A ENGINE_CLI=([qemu]=qemu [virt-manager]=virtmgr [ovmf]=ovmf)
+declare -A ENGINE_VAR=([qemu]=qemu [virt-manager]=vm [ovmf]=ovmf)
+declare -A ENGINE_LABEL=([qemu]=QEMU [ovmf]=OVMF [virt-manager]=VIRT-MGR)
+declare -A ENGINE_LINK_VAR1=([qemu]=qemu_link [ovmf]=ovmf_code [virt-manager]=vm_link)
+declare -A ENGINE_LINK_VAR2=([ovmf]=ovmf_vars)
 
 usage() {
-cat <<EOF
+    local page flag desc
+    record_load
+    cat <<EOF
 usage: ./install.sh [actions]
 
   With no component flags on a terminal, opens the build menu.  Missing
@@ -205,25 +155,29 @@ usage: ./install.sh [actions]
    --virtmgr:patch=LIST                 virt-manager patch groups
 
  After the build
-   --deps:install                       install distro build dependencies
-   --deps:runtime                       install runtime dependencies (sudo)
-   --after:clean=sources|deps|all|none  post-build cleanup
-   --after:misc=verify,launchitem       verification and desktop launcher
-   --sessionvfio                        install the vfio helper (sudo + udev)
-   --writexml                           write domain XML examples
+   --tool=LIST                    one or more, comma separated:
+EOF
+    for page in "${PAGE_ORDER[@]}"; do
+        [ "${PAGE_KIND[$page]:-}" = tool ] || continue
+        for flag in $(page_flags "$page"); do
+            [ "$(u_kind "$page" "$flag")" = tool ] || continue
+            desc=${U_DESC["$page|$flag"]}
+            printf '                                   %-14s %s\n' "$flag" "$desc"
+        done
+    done
+    cat <<EOF
 
  Other
    --update                       resolve latest upstreams and rewrite the lock
-   --list-patches                 print the manifest
+   --list-patches                 list discovered patches
    --prefix=DIR                   install prefix (default: ./prefix)
    --jobs=N                       parallel build jobs (default: nproc)
    --dxvk-tarball=FILE            use this dxvk-native tarball instead of building
    --dry-run                      resolve and report, change nothing
    -h, --help
 
- Patch groups: see --list-patches.  Patch values are the flag names shown
- in the TUI (spicevirgl, gtkegl, flexresize, vmvga, pcimenu, usbmenu,
- usbcache, reparent, nosplash, nomessage).
+ Patch values are the flag names shown in the TUI; run --list-patches to
+ list them.
 EOF
 }
 
@@ -233,185 +187,380 @@ warn() { printf '%sWARNING:%s %s\n' "$c_yellow" "$c_reset" "$*" >&2; }
 section() { printf '\n%s==>%s %s%s%s\n' "$c_bold$c_cyan" "$c_reset" "$c_bold" "$*" "$c_reset"; }
 
 conf_get() {
-    awk -F= -v s="[$1]" -v k="$2" '
-        $0 == s { on = 1; next }
-        /^\[/ { on = 0 }
-        on && $1 ~ "^[[:space:]]*" k "[[:space:]]*$" {
-            sub(/^[^=]*=/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit
+    awk -v s="[$1]" -v k="$2" '
+        $0 == s { in_s = 1; next }
+        /^\[/ { in_s = 0 }
+        in_s && $1 == k {
+            sub(/^[^=]*=[ \t]*/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); print; exit
         }' "$CONF"
 }
 
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 
-# Discover all patches for an engine by scanning patches/<engine>/ for
-# *.patch and *.sh files and reading their VMM_* metadata comments.
-# Output lines: FLAG|NAME|DESC|DEPS|TICK   (TICK = yes means ticked by default)
-discover_patches() {
-    local engine="${1:-}" dir="$DIR/patches/$engine" f
-    local flag name desc deps tick line
-    for f in "$dir"/*.patch "$dir"/*.sh; do
-        [ -e "$f" ] || continue
-        flag=""; name=""; desc=""; deps="-"; tick="no"
-        while IFS= read -r line; do
-            case "$line" in
-                "# VMM_FLAG:"*) flag="${line#*VMM_FLAG:}"; flag="${flag# }" ;;
-                "# VMM_NAME:"*) name="${line#*VMM_NAME:}"; name="${name# }" ;;
-                "# VMM_DESC:"*) desc="${line#*VMM_DESC:}"; desc="${desc# }" ;;
-                "# VMM_DEPS:"*) deps="${line#*VMM_DEPS:}"; deps="${deps# }" ;;
-                "# VMM_TICK:"*) tick="${line#*VMM_TICK:}"; tick="${tick# }" ;;
-            esac
-        done < "$f"
-        [ -n "$flag" ] || continue
-        printf '%s|%s|%s|%s|%s\n' "$flag" "$name" "$desc" "$deps" "$tick"
-    done | sort -t'|' -k1,1
+ENGINES=()
+declare -A U_KIND=() U_NAME=() U_DESC=() U_DEPS=() U_PATH=() U_SUDO=() U_TICK=() U_ON=()
+declare -A PAGE_UNITS=() PAGE_KIND=()
+PAGE_ORDER=()
+declare -A BUILD_MODES=()
+
+engine_cache_init() {
+    local page f modes
+    record_load
+    ENGINES=()
+    for page in "${PAGE_ORDER[@]}"; do
+        [ "${PAGE_KIND[$page]:-}" = engine ] || continue
+        ENGINES+=("$page")
+        modes=""
+        for f in $(page_flags "$page"); do
+            [ "$(u_kind "$page" "$f")" = bin ] && modes="${modes:+$modes }$f"
+        done
+        BUILD_MODES[$page]=$modes
+    done
+    [ "${#ENGINES[@]}" -gt 0 ] || die "no engines reported by tools/build.sh"
 }
 
-# Return the comma-separated list of patches flagged VMM_TICK=yes for an engine.
+patch_field() {
+    local page="$1" flag="$2" field="$3"
+    case "$field" in
+        name) printf '%s' "${U_NAME["$page|$flag"]:-}" ;;
+        desc) printf '%s' "${U_DESC["$page|$flag"]:-}" ;;
+        deps) printf '%s' "${U_DEPS["$page|$flag"]:-}" ;;
+        tick) printf '%s' "${U_TICK["$page|$flag"]:-}" ;;
+        path) printf '%s' "${U_PATH["$page|$flag"]:-}" ;;
+    esac
+}
+
+patch_flags() {
+    local page="$1" f
+    for f in $(page_flags "$page"); do
+        [ "$(u_kind "$page" "$f")" = patch ] && printf '%s\n' "$f"
+    done
+}
+
 default_groups() {
-    discover_patches "$1" | awk -F'|' '$5=="yes" {print $1}' | paste -sd,
+    local page="$1" f out=""
+    for f in $(patch_flags "$page"); do
+        [ "$(patch_field "$page" "$f" tick)" = yes ] && out="${out:+$out,}$f"
+    done
+    printf '%s' "$out"
 }
 
 list_patches() {
+    local engine f deps
     printf '%-14s %-12s %-10s %-9s %-6s %s\n' ENGINE FLAG DEPENDS TICK NAME DESCRIPTION
-    for engine in qemu virt-manager ovmf; do
-        discover_patches "$engine" | while IFS='|' read -r flag name desc deps tick; do
-            printf '%-14s %-12s %-10s %-9s %-6s %s\n' "$engine" "$flag" "$deps" "$tick" "$name" "$desc"
+    for engine in "${ENGINES[@]}"; do
+        for f in $(patch_flags "$engine"); do
+            deps=$(patch_field "$engine" "$f" deps)
+            printf '%-14s %-12s %-10s %-9s %-6s %s\n' "$engine" "$f" \
+                "${deps:--}" "$(patch_field "$engine" "$f" tick)" \
+                "$(patch_field "$engine" "$f" name)" "$(patch_field "$engine" "$f" desc)"
         done
     done
 }
 
-groups_for() {
-    discover_patches "$1" | cut -d'|' -f1
-}
-
-# Resolve a flag to its metadata fields. Sets REPLY to "NAME|DESC|DEPS|TICK".
-patch_meta() {
-    local engine="$1" flag="$2"
-    REPLY=""
-    discover_patches "$engine" | while IFS='|' read -r f n d dp tk; do
-        if [ "$f" = "$flag" ]; then
-            printf '%s|%s|%s|%s' "$n" "$d" "$dp" "$tk"
-            return
-        fi
-    done > /tmp/opencode/patch_meta_$$
-    REPLY="$(cat /tmp/opencode/patch_meta_$$ 2>/dev/null)"
-    rm -f /tmp/opencode/patch_meta_$$
-}
-
 validate_selection() {
-    local engine="$1" sel="$2"
-    local known g dep d
-    known=" $(groups_for "$engine" | tr '\n' ' ') "
-    for g in $(echo "$sel" | tr ',' ' '); do
+    local engine="$1" sel="$2" g d deps
+    for g in $(printf '%s' "$sel" | tr ',' ' '); do
         [ -n "$g" ] || continue
-        case " $known " in
+        case " $(patch_flags "$engine" | tr '\n' ' ') " in
             *" $g "*) ;;
             *) die "unknown $engine flag '$g' (see --list-patches)" ;;
         esac
-    done
-    for g in $(echo "$sel" | tr ',' ' '); do
-        [ -n "$g" ] || continue
-        deps=$(discover_patches "$engine" | awk -F'|' -v g="$g" '$1==g {print $4}')
-        [ "$deps" = "-" ] && continue
-        oldifs="$IFS"
-        IFS=','
-        for d in $deps; do
+        deps=$(patch_field "$engine" "$g" deps)
+        for d in $(printf '%s' "$deps" | tr ',' ' '); do
             [ -n "$d" ] || continue
-            case " $(echo "$sel" | tr ',' ' ') " in
+            case " $(printf '%s' "$sel" | tr ',' ' ') " in
                 *" $d "*) ;;
                 *) die "$engine/$g requires $engine/$d" ;;
             esac
         done
-        IFS="$oldifs"
     done
 }
 
-# Map a --patch flag value to the canonical flag name (validates existence).
 map_group() {
     local engine="$1" flag="$2"
     REPLY=""
-    discover_patches "$engine" | while IFS='|' read -r f n d dp; do
-        if [ "$f" = "$flag" ]; then
-            printf '%s' "$flag"
-            return
-        fi
-    done > /tmp/opencode/map_group_$$
-    REPLY="$(cat /tmp/opencode/map_group_$$ 2>/dev/null)"
-    rm -f /tmp/opencode/map_group_$$
-    [ -n "$REPLY" ] || die "unknown $engine patch flag '$flag' (see --list-patches)"
+    case " $(patch_flags "$engine" | tr '\n' ' ') " in
+        *" $flag "*) REPLY=$flag ;;
+        *) die "unknown $engine patch flag '$flag' (see --list-patches)" ;;
+    esac
 }
 
 assign_groups() {
     local eng="$1" list="$2" var="$3" out="" g
-    local IFS=,
-    for g in $list; do
+    for g in $(printf '%s' "$list" | tr ',' ' '); do
         [ -n "$g" ] || continue
         map_group "$eng" "$g"
-        [ -n "$REPLY" ] || continue
         case ",$out," in *",$REPLY,"*) continue ;; esac
         out="${out:+$out,}$REPLY"
     done
     printf -v "$var" '%s' "$out"
 }
 
+record_load() {
+    local kind="" page="" flag="" name="" desc="" deps="" path="" tick="" post="" sudo=""
+    PAGE_ORDER=(); PAGE_UNITS=(); PAGE_KIND=()
+    U_KIND=(); U_NAME=(); U_DESC=(); U_DEPS=(); U_PATH=(); U_SUDO=(); U_TICK=(); U_ON=()
+    while IFS='|' read -r kind page flag name desc deps path tick post sudo; do
+        [ -n "$flag" ] || continue
+        U_KIND["$page|$flag"]=$kind
+        U_NAME["$page|$flag"]=$name
+        U_DESC["$page|$flag"]=$desc
+        U_DEPS["$page|$flag"]=$deps
+        U_PATH["$page|$flag"]=$path
+        U_SUDO["$page|$flag"]=$sudo
+        U_TICK["$page|$flag"]=$tick
+        U_ON["$page|$flag"]=0
+        case " ${PAGE_UNITS[$page]:-} " in
+            *" $flag "*) ;;
+            *) PAGE_UNITS[$page]="${PAGE_UNITS[$page]:+${PAGE_UNITS[$page]} }$flag" ;;
+        esac
+        case "$kind" in
+            bin) PAGE_KIND[$page]=engine ;;
+            tool) PAGE_KIND[$page]=tool ;;
+        esac
+        case " ${PAGE_ORDER[*]:-} " in
+            *" $page "*) ;;
+            *) PAGE_ORDER+=("$page") ;;
+        esac
+    done < <("$DIR/tools/build.sh" --list) ||
+        die "cannot read the unit record from tools/build.sh"
+}
+
+menu_catalog_init() { record_load; }
+
+page_flags() { printf '%s' "${PAGE_UNITS[$1]:-}"; }
+u_kind() { printf '%s' "${U_KIND["$1|$2"]:-}"; }
+u_on() { printf '%s' "${U_ON["$1|$2"]:-0}"; }
+u_set() { U_ON["$1|$2"]=$3; }
+u_toggle() {
+    if [ "$(u_on "$1" "$2")" = 1 ]; then u_set "$1" "$2" 0; else u_set "$1" "$2" 1; fi
+}
+
+u_path_get() {
+    local page="$1" flag="$2" want="$3" oldifs="$IFS" pair
+    IFS=';'
+    for pair in ${U_PATH["$page|$flag"]:-}; do
+        IFS="$oldifs"
+        [ "${pair%%=*}" = "$want" ] && { printf '%s' "${pair#*=}"; return 0; }
+        IFS=';'
+    done
+    IFS="$oldifs"
+    return 0
+}
+
+u_path_set() {
+    local page="$1" flag="$2" want="$3" value="$4"
+    local oldifs="$IFS" pair out="" seen=0
+    IFS=';'
+    for pair in ${U_PATH["$page|$flag"]:-}; do
+        IFS="$oldifs"
+        if [ "${pair%%=*}" = "$want" ]; then
+            pair="$want=$value"; seen=1
+        fi
+        out="${out:+$out;}$pair"
+        IFS=';'
+    done
+    IFS="$oldifs"
+    [ "$seen" = 1 ] || out="${out:+$out;}$want=$value"
+    U_PATH["$page|$flag"]=$out
+}
+
+u_path_tags() {
+    local page="$1" flag="$2" oldifs="$IFS" pair
+    IFS=';'
+    for pair in ${U_PATH["$page|$flag"]:-}; do
+        IFS="$oldifs"
+        printf '%s\n' "${pair%%=*}"
+        IFS=';'
+    done
+    IFS="$oldifs"
+}
+
+menu_page_info() {
+    local want="$1" p id tab key
+    for p in "${PAGES[@]}"; do
+        IFS='|' read -r id tab key <<< "$p"
+        [ "$id" = "$menu_page" ] || continue
+        case "$want" in
+            tab) printf '%s' "$tab" ;;
+            key)
+                case "$id" in
+                    1|2|3) printf 'build' ;;
+                    *) printf '%s' "$key" ;;
+                esac ;;
+            engine) [ "${PAGE_KIND[$key]:-}" = engine ] && printf '%s' "$key" ;;
+        esac
+        return 0
+    done
+}
+
+menu_units() {
+    local op="$1" page="$2" kind="$3" arg="${4:-}" f out="" n=0
+    for f in $(page_flags "$page"); do
+        [ "$(u_kind "$page" "$f")" = "$kind" ] || continue
+        n=$((n + 1))
+        case "$op" in
+            get)  [ "$(u_on "$page" "$f")" = 1 ] &&
+                      { out="${out:+$out,}$f"; [ "$kind" = bin ] && break; } ;;
+            set)  if [ "$kind" = bin ]; then
+                      if [ "$f" = "$arg" ]; then u_set "$page" "$f" 1
+                      else u_set "$page" "$f" 0; fi
+                  else
+                      case ",$arg," in *",$f,"*) u_set "$page" "$f" 1 ;;
+                          *) u_set "$page" "$f" 0 ;; esac
+                  fi ;;
+        esac
+    done
+    case "$op" in
+        get)  printf '%s' "$out" ;;
+        count) printf '%s' "$n" ;;
+    esac
+}
+
+menu_bin_get()    { menu_units get   "$1" bin; }
+menu_bin_set()    { menu_units set   "$1" bin "$2"; }
+menu_bin_flag()   { menu_bin_get "$1"; }
+menu_groups_get() { menu_units get   "$1" patch; }
+menu_groups_set() { menu_units set   "$1" patch "$2"; }
+menu_flag_count_kind() { menu_units count "$1" "$2"; }
+
+menu_link() {
+    local op="$1" eng="$2" idx="${3:-1}" value="${4:-}" f tags tag n=0
+    f=$(menu_bin_flag "$eng")
+    tags=$(u_path_tags "$eng" "$f")
+    for tag in $tags; do
+        n=$((n + 1))
+        [ "$n" = "$idx" ] || continue
+        case "$op" in
+            tag)   printf '%s' "$tag" ;;
+            get)   u_path_get "$eng" "$f" "$tag" ;;
+            set)   u_path_set "$eng" "$f" "$tag" "$value" ;;
+            count) printf '%s' "$n" ;;
+        esac
+        return 0
+    done
+    [ "$op" = count ] && printf '%s' "$n"
+}
+
+engine_link_var() {
+    local eng="$1" want="$2" tags tag n=0
+    tags=$(u_path_tags "$eng" link)
+    for tag in $tags; do
+        n=$((n + 1))
+        [ "$tag" = "$want" ] || continue
+        [ "$n" = 1 ] && { printf '%s' "${ENGINE_LINK_VAR1[$eng]:-}"; return 0; }
+        [ "$n" = 2 ] && { printf '%s' "${ENGINE_LINK_VAR2[$eng]:-}"; return 0; }
+    done
+    return 1
+}
+
+assign_link() {
+    local eng="$1" cell="$2" pair tag var oldifs="$IFS"
+    IFS=';'
+    for pair in $cell; do
+        IFS="$oldifs"
+        [ -n "$pair" ] || continue
+        tag="${pair%%=*}"
+        case "$pair" in *=*) ;; *)
+            tag=$(u_path_tags "$eng" link | head -1)
+            pair="$tag=$pair" ;;
+        esac
+        var=$(engine_link_var "$eng" "$tag") ||
+            die "--${ENGINE_CLI[$eng]}:bin=link: unknown tag '$tag'"
+        printf -v "$var" '%s' "${pair#*=}"
+        IFS=';'
+    done
+    IFS="$oldifs"
+}
+
+declare -A TOOL_PATH=() TOOL_SUDO=()
+tools_cache_init() {
+    local page flag
+    for page in "${PAGE_ORDER[@]}"; do
+        [ "${PAGE_KIND[$page]:-}" = tool ] || continue
+        for flag in $(page_flags "$page"); do
+            [ "$(u_kind "$page" "$flag")" = tool ] || continue
+            TOOL_PATH["$flag"]="${U_PATH["$page|$flag"]}"
+            TOOL_SUDO["$flag"]="${U_SUDO["$page|$flag"]}"
+        done
+    done
+}
+
+# elevate=yes honours SUDO; elevate=no never asks for a password.
+_tool_exec() {
+    local elevate="$1" flag="${2:-}"
+    shift 2 || true
+    local path="${TOOL_PATH[$flag]:-}" sudo="${TOOL_SUDO[$flag]:-no}"
+    [ -n "$flag" ] || die "_tool_exec: empty flag"
+    [ -n "$path" ] || die "unknown tool '$flag'"
+    [ -f "$DIR/$path" ] || die "tool script missing: $path"
+    local -a env=(VMM_ROOT="$DIR" VMM_PREFIX="$prefix" VMM_SRC="$SRC"
+                  VMM_BUILD="$BUILD" VMM_STATE="$STATE" VMM_USER="${SUDO_USER:-$(id -un)}")
+    if [ "$elevate" = yes ] && [ "$sudo" = yes ]; then
+        as_root env "${env[@]}" bash "$DIR/$path" "$@"
+    else
+        env "${env[@]}" bash "$DIR/$path" "$@"
+    fi
+}
+
+run_tool() { _tool_exec yes "$@"; }
+
+probe_tool() { _tool_exec no "$@"; }
+
+engine_cache_init
+tools_cache_init
+
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         --list-patches) list=1; shift ;;
-        --qemu:bin=*)
-            v="${1#*=}"; qemu_bin_given=1
-            case "$v" in
-                compile|skip) qemu_bin="$v" ;;
-                link) qemu_bin=link ;;
-                link:*) qemu_bin=link; qemu_link="${v#link:}" ;;
-                *) die "--qemu:bin expects compile, skip or link:PATH" ;;
-            esac; shift ;;
-        --qemu:patch=*)
-            assign_groups qemu "${1#*=}" qemu_groups
-            qemu_groups_given=1; shift ;;
-        --virtmgr:bin=*)
-            v="${1#*=}"; vm_bin_given=1
-            case "$v" in
-                compile|skip) vm_bin="$v" ;;
-                link) vm_bin=link ;;
-                link:*) vm_bin=link; vm_link="${v#link:}" ;;
-                *) die "--virtmgr:bin expects compile, skip or link:PATH" ;;
-            esac; shift ;;
-        --virtmgr:patch=*)
-            assign_groups virt-manager "${1#*=}" vm_groups
-            vm_groups_given=1; shift ;;
-        --ovmf:bin=*)
-            v="${1#*=}"; ovmf_bin_given=1
-            case "$v" in
-                pull|compile|link|skip) ovmf_bin="$v" ;;
-                *) die "--ovmf:bin expects pull, compile, link or skip" ;;
-            esac; shift ;;
-        --ovmf:code=*) ovmf_code="${1#*=}"; shift ;;
-        --ovmf:vars=*) ovmf_vars="${1#*=}"; shift ;;
-        --ovmf:patch=*)
-            assign_groups ovmf "${1#*=}" ovmf_groups
-            ovmf_groups_given=1; shift ;;
-        --deps:install) install_deps=1; shift ;;
-        --deps:runtime) runtime_deps=1; shift ;;
-        --after:clean=*)
-            clean_given=1
-            clean_mode="${1#*=}"
-            if [ "$clean_mode" = none ]; then
-                no_clean=1; clean_mode=""
+        --*:bin=*|--*:patch=*)
+            arg="${1#--}"
+            cli="${arg%%:*}"
+            kind="${arg#*:}"; kind="${kind%%=*}"
+            value="${arg#*=}"
+            eng=""
+            for e in "${ENGINES[@]}"; do
+                [ "${ENGINE_CLI[$e]}" = "$cli" ] && { eng="$e"; break; }
+            done
+            [ -n "$eng" ] || die "unknown component '$cli'"
+            var="${ENGINE_VAR[$eng]}"
+            if [ "$kind" = bin ]; then
+                mode="$value"; extra=""
+                case "$mode" in
+                    *:*) extra="${mode#*:}"; mode="${mode%%:*}" ;;
+                esac
+                case " ${BUILD_MODES[$eng]} " in
+                    *" $mode "*) ;;
+                    *) die "--$cli:bin expects one of: ${BUILD_MODES[$eng]}" ;;
+                esac
+                printf -v "${var}_bin" '%s' "$mode"
+                printf -v "${var}_bin_given" '%s' 1
+                [ -n "$extra" ] && assign_link "$eng" "$extra"
+            elif [ "$kind" = patch ]; then
+                assign_groups "$eng" "$value" "${var}_groups"
+                printf -v "${var}_groups_given" '%s' 1
+            else
+                die "unknown option --$cli:$kind"
             fi
             shift ;;
-        --after:misc=*)
-            misc_given=1; verify=0; launchitem=0
-            for m in $(echo "${1#*=}" | tr ',' ' '); do
-                case "$m" in
-                    verify) verify=1 ;;
-                    launchitem) launchitem=1 ;;
-                    none|"") ;;
-                    *) die "--after:misc expects verify, launchitem or none" ;;
+        --tool=*)
+            for t in $(printf '%s' "${1#*=}" | tr ',' ' '); do
+                case "$t" in
+                    deps)          install_deps=1 ;;
+                    session-vfio)  session_vfio=1 ;;
+                    libvirt-access) libvirt_access=1; libvirt_access_given=1 ;;
+                    write-xml)     emit_domains=1 ;;
+                    verify)        verify=1 ;;
+                    desktop-item)  launchitem=1 ;;
+                    clean-deps)    clean_deps=1; clean_given=1 ;;
+                    clean-sources) clean_sources=1; clean_given=1 ;;
+                    none|"")       ;;
+                    *) die "--tool: unknown item '$t' (see --help)" ;;
                 esac
-            done; shift ;;
-        --sessionvfio) session_vfio=1; shift ;;
-        --writexml) emit_domains=1; shift ;;
+            done
+            shift ;;
         --update) update=1; shift ;;
         --prefix=*) prefix="${1#*=}"; shift ;;
         --jobs=*) jobs="${1#*=}"; shift ;;
@@ -422,13 +571,8 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$list" = 1 ] && { list_patches; exit 0; }
-case "$clean_mode" in
-    ""|sources|deps|all) ;;
-    *) die "--after:clean expects sources, deps, all or none" ;;
-esac
 [ -f "$CONF" ] || die "missing $CONF"
 
-# A patch or path flag implies the natural binary mode.
 [ "$qemu_groups_given" = 1 ] && [ -z "$qemu_bin" ] && qemu_bin=compile
 [ "$vm_groups_given" = 1 ] && [ -z "$vm_bin" ] && vm_bin=compile
 [ "$ovmf_groups_given" = 1 ] && [ -z "$ovmf_bin" ] && ovmf_bin=compile
@@ -466,38 +610,56 @@ finalize_modes() {
     esac
 }
 
-validate_paths() {
-    case "$qemu_bin" in
-        link)
-            if [ "$qemu_link" = system ]; then
-                qemu_link=$(command -v qemu-system-x86_64 2>/dev/null || true)
-                [ -n "$qemu_link" ] ||
-                    die "--qemu:bin=link: no system qemu-system-x86_64 found"
+# single-tag row is a program (must be executable) while a two-tag row is a
+# data pair such as OVMF CODE/VARS (must exist as a file).
+links_for() {
+    local eng="$1" cell="${2:-}" check="${3:-no}" pair tag var path n=0
+    local tags count oldifs="$IFS"
+    tags=$(u_path_tags "$eng" link)
+    count=$(printf '%s\n' "$tags" | grep -c .)
+    IFS=';'
+    for pair in $cell; do
+        IFS="$oldifs"
+        [ -n "$pair" ] || continue
+        n=$((n + 1))
+        tag="${pair%%=*}"
+        case "$pair" in *=*) ;; *)
+            tag=$(printf '%s\n' "$tags" | sed -n "${n}p")
+            pair="$tag=$pair" ;;
+        esac
+        var=$(engine_link_var "$eng" "$tag") ||
+            die "--${ENGINE_CLI[$eng]}:bin=link: unknown tag '$tag'"
+        path=${pair#*=}
+        if [ "$check" = yes ]; then
+            [ -n "$path" ] || die "--${ENGINE_CLI[$eng]}:bin=link:$tag is empty"
+            if [ "$count" -eq 1 ]; then
+                [ -x "$path" ] || die "not executable: $path"
+            else
+                [ -f "$path" ] || die "no such file: $path"
             fi
-            [ -n "$qemu_link" ] || die "--qemu:bin=link needs a path"
-            [ -x "$qemu_link" ] || die "not executable: $qemu_link"
-            qemu_link=$(readlink -f "$qemu_link")
-            ;;
-        compile|skip|"") ;;
-        *) die "--qemu:bin expects compile, skip or link:PATH" ;;
-    esac
-    case "$vm_bin" in
-        link)
-            [ -n "$vm_link" ] || die "--virtmgr:bin=link needs a path"
-            [ -x "$vm_link" ] || die "not executable: $vm_link"
-            vm_link=$(readlink -f "$vm_link")
-            ;;
-        compile|skip|"") ;;
-        *) die "--virtmgr:bin expects compile, skip or link:PATH" ;;
-    esac
-    if [ "$ovmf_bin" = link ]; then
-        [ -n "$ovmf_code" ] && [ -n "$ovmf_vars" ] ||
-            die "--ovmf:bin=link needs --ovmf:code and --ovmf:vars"
-        [ -f "$ovmf_code" ] || die "no such OVMF CODE file: $ovmf_code"
-        [ -f "$ovmf_vars" ] || die "no such OVMF VARS file: $ovmf_vars"
-        ovmf_code=$(readlink -f "$ovmf_code")
-        ovmf_vars=$(readlink -f "$ovmf_vars")
-    fi
+            path=$(readlink -f "$path")
+        fi
+        printf -v "$var" '%s' "$path"
+        IFS=';'
+    done
+    IFS="$oldifs"
+}
+
+validate_paths() {
+    local eng var cell
+    for eng in "${ENGINES[@]}"; do
+        var="${ENGINE_VAR[$eng]}_bin"
+        case "${!var}" in
+            link) ;;
+            compile|pull|skip|"") continue ;;
+            *) die "--${ENGINE_CLI[$eng]}:bin expects ${BUILD_MODES[$eng]// /, }" ;;
+        esac
+        cell=""
+        for var in ${ENGINE_LINK_VAR1[$eng]:-} ${ENGINE_LINK_VAR2[$eng]:-}; do
+            cell="${cell:+$cell;}${!var:-}"
+        done
+        links_for "$eng" "$cell" yes
+    done
 }
 
 finalize_modes
@@ -523,215 +685,54 @@ note "locks: virt-manager $vm_lock, qemu $qemu_lock, vmvga ${vmvga_lock%????????
 component_given=0
 [ "$qemu_bin_given$vm_bin_given$ovmf_bin_given" != 000 ] && component_given=1
 other_action=0
-if [ "$install_deps" = 1 ] || [ "$runtime_deps" = 1 ] ||
+if [ "$install_deps" = 1 ] ||
    [ "$session_vfio" = 1 ] ||
-   [ "$emit_domains" = 1 ] || [ "$update" = 1 ] || [ -n "$clean_mode" ]; then
+   [ "$emit_domains" = 1 ] || [ "$update" = 1 ] ||
+   [ "$clean_sources" = 1 ] || [ "$clean_deps" = 1 ]; then
     other_action=1
 fi
 
 if [ "$dry_run" = 1 ]; then
     validate_paths
-    [ -n "$clean_mode" ] &&
-        note "dry run: would clean $clean_mode after any build"
-    case ",$qemu_groups," in
-        *,spicevirgl,*) [ -f "$DIR/patches/qemu/spicevirgl.patch" ] ||
-            die "missing patches/qemu/spicevirgl.patch" ;;
-    esac
-    case ",$qemu_groups," in
-        *,flexresize,*) [ -f "$DIR/patches/qemu/flexresize.patch" ] ||
-            die "missing patches/qemu/flexresize.patch" ;;
-    esac
-    case ",$qemu_groups," in
-        *,gtkegl,*) [ -f "$DIR/patches/qemu/gtkegl.patch" ] ||
-            die "missing patches/qemu/gtkegl.patch" ;;
-    esac
-    case ",$qemu_groups," in
-        *,vmvga,*) [ -x "$DIR/patches/qemu/vmvga.sh" ] ||
-            die "missing patches/qemu/vmvga.sh" ;;
-    esac
-    for g in $(echo "$vm_groups" | tr ',' ' '); do
-        [ -f "$DIR/patches/virt-manager/$g.patch" ] ||
-            die "missing virt-manager patch for $g"
-    done
-    for g in $(echo "$ovmf_groups" | tr ',' ' '); do
-        case "$g" in
-            nosplash) ;;  # blanked in place from the upstream edk2 image
-            nomessage) [ -f "$DIR/patches/ovmf/nomessage.patch" ] ||
-                die "missing patches/ovmf/nomessage.patch" ;;
-        esac
-    done
+    if [ "$clean_sources" = 1 ] || [ "$clean_deps" = 1 ]; then
+        note "dry run: would clean sources=$clean_sources deps=$clean_deps after any build"
+    fi
     [ -n "$qemu_file" ] || die "qemu lock_file missing (use --update)"
     note "dry run: sources, patches and locks resolve; no changes made"
     exit 0
 fi
 
 if [ -z "$qemu_bin$vm_bin$ovmf_bin" ] && \
-   [ "$install_deps" = 0 ] && [ "$runtime_deps" = 0 ] && [ "$session_vfio" = 0 ] && \
+   [ "$install_deps" = 0 ] && [ "$session_vfio" = 0 ] && \
    [ "$emit_domains" = 0 ] && [ "$update" = 0 ] && \
    [ "$verify" = 0 ] && [ "$launchitem" = 0 ] && \
-   [ -z "$clean_mode" ] && [ ! -t 0 ]; then
+   [ "$clean_sources" = 0 ] && [ "$clean_deps" = 0 ] && [ ! -t 0 ]; then
     note "nothing to do (see --help)"
     exit 0
 fi
 
-# ---------------------------------------------------------------- dependencies
 
-pkg_missing=()
-pkg_check() { pkg-config --exists "$1" 2>/dev/null || pkg_missing+=("$1"); }
-
-deps_check() {
-    local c
-    for c in git curl tar meson ninja pkg-config python3 gcc rst2man; do
-        command -v "$c" >/dev/null 2>&1 || pkg_missing+=("cmd:$c")
-    done
-    for p in glib-2.0 gtk+-3.0 spice-protocol spice-server gbm libdrm epoxy \
-             x11 vulkan libusb-1.0 pciaccess sdl3 sdl2 glfw3; do
-        pkg_check "$p"
-    done
-    python3 - <<'PY' 2>/dev/null || pkg_missing+=("python:gi")
-import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("LibvirtGLib", "1.0")
-PY
-}
-
-vm_deps_check() {
-    local c
-    for c in git meson ninja pkg-config python3 rst2man; do
-        command -v "$c" >/dev/null 2>&1 || pkg_missing+=("cmd:$c")
-    done
-    pkg_check glib-2.0
-    pkg_check gtk+-3.0
-    python3 - <<'PY' 2>/dev/null || pkg_missing+=("python:gi")
-import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("LibvirtGLib", "1.0")
-PY
-}
-
-ovmf_deps_check() {
-    local c
-    for c in gcc make nasm iasl python3; do
-        command -v "$c" >/dev/null 2>&1 || pkg_missing+=("cmd:$c")
-    done
-}
-
-distro_id() { (. /etc/os-release 2>/dev/null; echo "${ID:-} ${ID_LIKE:-}"); }
 
 as_root() {
     if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi
 }
 
-# Installed package names, sorted.  Used to diff what --deps:install added.
-pkg_snapshot() {
-    case "$(distro_id)" in
-        *arch*) pacman -Qq 2>/dev/null ;;
-        *debian*|*ubuntu*)
-            dpkg-query -W -f='${binary:Package}\n' 2>/dev/null ;;
-        *fedora*|*rhel*|*centos*)
-            rpm -qa --qf '%{NAME}\n' 2>/dev/null ;;
-    esac | sort -u
-}
-
-record_new_deps() {
-    local before="$1" after="$2" target="${3:-$DEPS_STATE}"
-    local label="${4:---deps:install}" newf="$target.tmp.new"
-    [ -n "$before" ] && [ -n "$after" ] || {
-        warn "package list unavailable; dependency tally skipped"
-        return 0
-    }
-    mkdir -p "$STATE"
-    comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") |
-        sed '/^$/d' > "$newf"
-    [ -s "$newf" ] || { rm -f "$newf"; return 0; }
-    { [ -f "$target" ] && cat "$target"; cat "$newf"; } |
-        sort -u > "$target.tmp"
-    mv -f "$target.tmp" "$target"
-    rm -f "$newf"
-    note "recorded $(wc -l < "$target") package(s) added by $label"
-}
-
-ask_yes() {
-    local prompt="$1" def="$2" ans
-    read -r -p "$prompt [$def]: " ans
-    ans=${ans:-$def}
-    case "$ans" in [yY]*) return 0 ;; *) return 1 ;; esac
-}
-
-# ---------------------------------------------------------------- build menu
-
-ovmf_find_code() {
-    local f
-    for f in /usr/share/OVMF/OVMF_CODE_4M.fd \
-             /usr/share/ovmf/OVMF_CODE_4M.fd \
-             /usr/share/edk2/ovmf/OVMF_CODE.fd \
-             /usr/share/edk2/x64/OVMF_CODE.4m.fd \
-             /usr/share/ovmf/x64/OVMF_CODE.4m.fd; do
-        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
-    done
-}
-
-ovmf_find_vars() {
-    local f
-    for f in /usr/share/OVMF/OVMF_VARS_4M.fd \
-             /usr/share/ovmf/OVMF_VARS_4M.fd \
-             /usr/share/edk2/ovmf/OVMF_VARS.fd \
-             /usr/share/edk2/x64/OVMF_VARS.4m.fd \
-             /usr/share/ovmf/x64/OVMF_VARS.4m.fd; do
-        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
-    done
-}
 
 menu_list_has() {
     case ",$1," in *",$2,"*) return 0 ;; esac
     return 1
 }
 
-menu_list_add() {
-    if menu_list_has "$1" "$2"; then printf '%s' "$1"
-    elif [ -n "$1" ]; then printf '%s,%s' "$1" "$2"
-    else printf '%s' "$2"
-    fi
-}
-
-menu_list_del() {
-    local out="" p
-    local IFS=,
-    for p in $1; do
-        [ "$p" = "$2" ] && continue
-        out="${out:+$out,}$p"
+# occurrence.  Order is otherwise irrelevant; nothing hardcodes it.
+menu_dedupe() {
+    local list="$1" out="" g
+    for g in $(printf '%s' "$list" | tr ',' ' '); do
+        [ -n "$g" ] || continue
+        case " $out " in *" $g "*) ;; *) out="${out:+$out,}$g" ;; esac
     done
     printf '%s' "$out"
 }
 
-menu_order() {
-    local list="$1" out="" p
-    shift
-    for p in "$@"; do
-        menu_list_has "$list" "$p" && out="${out:+$out,}$p"
-    done
-    printf '%s' "$out"
-}
-
-menu_qemu_display() { printf '%s' "$1"; }
-
-menu_vm_display()   { printf '%s' "$1"; }
-
-menu_ovmf_display() { printf '%s' "$1"; }
-
-menu_short_path() {
-    local p="$1" base dir
-    [ -n "$p" ] || { printf '<not found>'; return; }
-    if [ ${#p} -le 55 ]; then printf '%s' "$p"; return; fi
-    base=${p##*/}
-    dir=${p%/*}
-    dir=${dir%/*}
-    printf '%s/.../%s' "$dir" "$base"
-}
-
-# The marker column is the right edge of the box: its last character lands
-# on the same column as the end of the rule.  The flag "=" sits exactly on
-# the star column of the marker.
 menu_page=1
 menu_pages=6
 menu_mode=normal          # normal | link | sudo
@@ -739,11 +740,15 @@ menu_raw=0
 menu_stty=""
 MENU_COLS=100
 MENU_KEY=""
+MENU_LETTERS="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+declare -A MENU_ACTION=()
 MENU_DONE=0
 MENU_TEXT=""
 menu_signal=0
 menu_subfirst=1
 menu_sudo_pending=""
+menu_sudo_page=""
+menu_sudo_letter=""
 menu_text_active=0
 menu_blocked=0
 menu_revert_label=""
@@ -779,9 +784,10 @@ menu_frame() {
 }
 
 menu_tabs() {
-    local -a names=(QEMU OVMF VIRT-MGR HOST AFTER REVIEW)
-    local i=1 n
-    for n in "${names[@]}"; do
+    local i=1
+    for p in "${PAGES[@]}"; do
+        IFS='|' read -r id tab _ <<< "$p"
+        local n="$tab"
         if [ "$i" = "$menu_page" ]; then
             if [ "$menu_color" = 1 ]; then
                 printf '%s%s  %s  %s' "$c_tab_bg" "$c_tab_fg" "$n" "$c_reset"
@@ -796,7 +802,7 @@ menu_tabs() {
             fi
         fi
         i=$((i + 1))
-        [ "$i" -le "${#names[@]}" ] &&
+        [ "$i" -le "${#PAGES[@]}" ] &&
             printf '%s|%s' "$c_border" "$c_reset"
     done
     printf '\n'
@@ -830,8 +836,6 @@ menu_subsection() {
     fi
 }
 
-# key is three characters ("[A]") or three spaces.  The value ends at
-# MENU_COLS-4 and the three-character marker ends on the last column.
 menu_row() {
     local key="$1" label="$2" value="$3" mark="$4" sel="$5" pending="${6:-0}"
     local keycol labelcol valuecol markcol right avail lab pad
@@ -839,7 +843,6 @@ menu_row() {
         keycol="$c_bold$c_success"; labelcol="$c_bold$c_success"
         valuecol="$c_success"; markcol="$c_success"
     elif [ "$pending" = 1 ]; then
-        # Partially selected: the option is waiting on something (sudo).
         keycol="$c_bold$c_warning"; labelcol="$c_warning"
         valuecol="$c_warning"; markcol="$c_warning"
     else
@@ -857,12 +860,12 @@ menu_row() {
         "$pad" "" "$valuecol" "$right" "$c_reset"
 }
 
-menu_radio_mark() {
-    if [ "$1" = 1 ]; then printf '(*)'; else printf '( )'; fi
-}
-
-menu_check_mark() {
-    if [ "$1" = 1 ]; then printf '[*]'; else printf '[ ]'; fi
+menu_mark() {
+    if [ "$2" = 1 ]; then
+        [ "$1" = radio ] && printf '(*)' || printf '[*]'
+    else
+        [ "$1" = radio ] && printf '( )' || printf '[ ]'
+    fi
 }
 
 menu_path_line() {
@@ -870,8 +873,6 @@ menu_path_line() {
     printf '           %s%s%s\n' "$colour" "$text" "$c_reset"
 }
 
-# A reverted link edit keeps its "Found" line yellow until the option is
-# changed or the path is edited again.
 menu_found_colour() {
     if [ "$menu_revert_label" = "$1" ]; then
         printf '%s' "$c_warning"
@@ -880,381 +881,240 @@ menu_found_colour() {
     fi
 }
 
+# Fold text into width w, using prefix p for the first line and rest for
+menu_folded() {
+    local first="$1" rest="$2" width="$3" colour="$4" text="$5" line flag=1
+    [ "$width" -lt 12 ] && width=12
+    { [ -n "$text" ] && printf '%s\n' "$text" || printf '\n'; } |
+        fold -s -w "$width" | while IFS= read -r line; do
+            if [ "$flag" = 1 ]; then
+                printf '%s%s%s%s\n' "$first" "$colour" "$line" "$c_reset"
+                flag=0
+            else
+                printf '%s%s%s%s\n' "$rest" "$colour" "$line" "$c_reset"
+            fi
+        done
+}
+
 menu_note() {
-    local sel="${1:-0}" text="$2" colour line width=$((MENU_COLS - 9))
+    local sel="${1:-0}" colour
     if [ "$sel" = 1 ]; then colour="$c_success"; else colour="$c_muted"; fi
-    [ "$width" -lt 20 ] && width=20
-    printf '%s\n' "$text" | fold -s -w "$width" | while IFS= read -r line; do
-        printf '         %s%s%s\n' "$colour" "$line" "$c_reset"
-    done
+    menu_folded '         ' '         ' "$((MENU_COLS - 9))" "$colour" "$2"
 }
 
 menu_path_ok() { [ -n "$1" ] && [ -e "$1" ]; }
 
 menu_deps_missing() {
-    pkg_missing=()
-    [ "$vm_bin" = compile ] && vm_deps_check
-    [ "$qemu_bin" = compile ] && deps_check
-    [ "$ovmf_bin" = compile ] && ovmf_deps_check
-    printf '%s' "${#pkg_missing[@]}"
+    local n=0
+    [ "$(menu_bin_get qemu)" = compile ] && n=$((n + DEP_MISSING_QEMU))
+    [ "$(menu_bin_get ovmf)" = compile ] && n=$((n + DEP_MISSING_OVMF))
+    [ "$(menu_bin_get virt-manager)" = compile ] && n=$((n + DEP_MISSING_VM))
+    printf '%s' "$n"
 }
 
-# A build cannot succeed without the build dependencies unless the user is
-# about to grant sudo for them (host_deps=1).  While this is true the review
-# and run pages are out of reach; only the component pages remain.
+DEP_MISSING_QEMU=0
+DEP_MISSING_VM=0
+DEP_MISSING_OVMF=0
+DEP_MISSING_RUNTIME=0
+DEPS_SCANNED=0
+deps_scan() {
+    [ "$DEPS_SCANNED" = 1 ] && return 0
+    local target count
+    while IFS='|' read -r target count; do
+        case "$target" in
+            qemu)         DEP_MISSING_QEMU=$count ;;
+            virt-manager) DEP_MISSING_VM=$count ;;
+            ovmf)         DEP_MISSING_OVMF=$count ;;
+            runtime)      DEP_MISSING_RUNTIME=$count ;;
+        esac
+    done < <(probe_tool deps --missing)
+    DEPS_SCANNED=1
+}
+
+# not installed and the user has not chosen to install them.  menu_deps_missing
 menu_build_blocked() {
-    [ "$host_deps" = 0 ] || return 1
+    [ "$(u_on host deps)" = 1 ] && return 1
     [ "$(menu_deps_missing)" -gt 0 ]
 }
 
-menu_pages() {
-    if { [ "$menu_page" = 4 ] || [ "$menu_page" = 6 ]; } && menu_build_blocked; then
-        printf '1-3'
-    else
-        printf '1-6'
-    fi
-}
-
 menu_toggle_patch_group() {
-    local engine="$1" flag="$2"
-    local current groups_var
-    case "$engine" in
-        qemu)       current="$qemu_groups" ;;
-        virt-manager) current="$vm_groups" ;;
-        ovmf)       current="$ovmf_groups" ;;
-        *) return ;;
-    esac
-
-    if menu_list_has "$current" "$flag"; then
-        # Disabling: drop this flag and anything that lists it in DEPS
-        local newgroups="" g deps oldifs drop=0
-        for g in $(echo "$current" | tr ',' ' '); do
-            [ -n "$g" ] || continue
-            [ "$g" = "$flag" ] && continue
-            deps=$(discover_patches "$engine" | awk -F'|' -v n="$g" '$1==n {print $4}')
-            if [ "$deps" != "-" ]; then
-                oldifs="$IFS"; IFS=','; drop=0
-                for d in $deps; do
-                    [ -n "$d" ] || continue
-                    if [ "$d" = "$flag" ]; then drop=1; break; fi
-                done
-                IFS="$oldifs"
-                [ "$drop" = 1 ] && continue
-            fi
-            newgroups="${newgroups:+$newgroups,}$g"
+    local engine="$1" flag="$2" f new=""
+    if [ "$(u_on "$engine" "$flag")" = 1 ]; then
+        for f in $(patch_flags "$engine"); do
+            [ "$(u_on "$engine" "$f")" = 1 ] || continue
+            [ "$f" = "$flag" ] && continue
+            menu_list_has "$(patch_field "$engine" "$f" deps)" "$flag" ||
+                new="${new:+$new,}$f"
         done
-        case "$engine" in
-            qemu) qemu_groups="$newgroups" ;;
-            virt-manager) vm_groups="$newgroups" ;;
-            ovmf) ovmf_groups="$newgroups" ;;
-        esac
     else
-        # Enabling: add this flag and all its DEPS
-        local addlist="$flag" deps oldifs d
-        deps=$(discover_patches "$engine" | awk -F'|' -v f="$flag" '$1==f {print $4}')
-        if [ "$deps" != "-" ]; then
-            oldifs="$IFS"; IFS=','
-            for d in $deps; do
-                [ -n "$d" ] || continue
-                addlist="$addlist,$d"
-            done
-            IFS="$oldifs"
-        fi
-        local combined="${current:+$current,}$addlist"
-        local deduped="" g
-        for g in $(echo "$combined" | tr ',' ' '); do
-            [ -n "$g" ] || continue
-            case " $deduped " in *" $g "*) ;; *) deduped="${deduped:+$deduped,}$g" ;; esac
+        new=$(menu_groups_get "$engine")
+        for f in $flag $(printf '%s' "$(patch_field "$engine" "$flag" deps)" | tr ',' ' '); do
+            [ -n "$f" ] || continue
+            case ",$new," in *",$f,"*) ;; *) new="${new:+$new,}$f" ;; esac
         done
-        case "$engine" in
-            qemu) qemu_groups="$deduped" ;;
-            virt-manager) vm_groups="$deduped" ;;
-            ovmf) ovmf_groups="$deduped" ;;
-        esac
     fi
+    menu_groups_set "$engine" "$(menu_dedupe "$new")"
 }
 
-menu_toggle_qemu_group()    { menu_toggle_patch_group qemu    "$1"; }
-menu_toggle_vm_group()      { menu_toggle_patch_group virt-manager "$1"; }
-menu_toggle_ovmf_group()    { menu_toggle_patch_group ovmf    "$1"; }
-
-menu_count() {
-    [ -n "$1" ] || { printf '0'; return; }
-    printf '%s' "$1" | tr ',' '\n' | grep -c .
-}
-
-menu_status_item() {
-    local label="$1" detail="$2" colour="$3"
-    if [ -n "$detail" ]; then
-        printf '%s%s%s %s%s%s' "$c_bold$colour" "$label" "$c_reset" \
-            "$c_muted" "$detail" "$c_reset"
-    else
-        printf '%s%s%s' "$c_bold$colour" "$label" "$c_reset"
-    fi
-}
-
-menu_status_values() {
-    local q_total o_total v_total
-    q_total=$(discover_patches qemu | grep -c .)
-    o_total=$(discover_patches ovmf | grep -c .)
-    v_total=$(discover_patches virt-manager | grep -c .)
-    case "$qemu_bin" in
-        compile) MENU_Q="compile ($(menu_count "$qemu_groups")/$q_total)" ;;
-        link) MENU_Q=link ;;
-        *) MENU_Q=skip ;;
-    esac
-    case "$ovmf_bin" in
-        compile) MENU_O="compile ($(menu_count "$ovmf_groups")/$o_total)" ;;
-        link) MENU_O=link ;;
-        pull) MENU_O=bundled ;;
-        *) MENU_O=skip ;;
-    esac
-    case "$vm_bin" in
-        compile) MENU_V="compile ($(menu_count "$vm_groups")/$v_total)" ;;
-        link) MENU_V=link ;;
-        *) MENU_V=skip ;;
-    esac
+menu_letters_end() {
+    local letters=ABCDEFGHIJKLMNOPQRSTUVWXYZ n="$1"
+    [ "$n" -lt 1 ] && n=1
+    printf '%s' "${letters:$((n - 1)):1}"
 }
 
 menu_status() {
-    local plain compact=0 sep
-    local q o v
-    menu_status_values
-    q=$MENU_Q; o=$MENU_O; v=$MENU_V
-    plain="QEMU $q  |  OVMF $o  |  VM $v"
-    [ $(( ${#plain} + 2 )) -gt "$MENU_COLS" ] && compact=1
-    if [ "$compact" = 1 ]; then
-        sep=' | '
-        case "$qemu_bin" in
-            compile) q="c$(menu_count "$qemu_groups")/$(discover_patches qemu | grep -c .)" ;;
-            link) q=link ;;
-            *) q=skip ;;
-        esac
-        case "$ovmf_bin" in
-            compile) o="c$(menu_count "$ovmf_groups")/$(discover_patches ovmf | grep -c .)" ;;
-            link) o=link ;;
-            pull) o=bundled ;;
-            *) o=skip ;;
-        esac
-        case "$vm_bin" in
-            compile) v="c$(menu_count "$vm_groups")/$(discover_patches virt-manager | grep -c .)" ;;
-            link) v=link ;;
-            *) v=skip ;;
-        esac
-        plain="QEMU $q$sep OVMF $o$sep VM $v"
-        # The status strip is informative, not load-bearing; trim instead of
-        # spilling past the frame on a narrow terminal.
-        if [ $(( ${#plain} + 2 )) -gt "$MENU_COLS" ]; then
-            plain="QEMU $q$sep OVMF $o$sep VM $v"
+    local eng val out="" short plain=""
+    for eng in "${ENGINES[@]}"; do
+        val=$(menu_bin_get "$eng")
+        if [ "$val" = compile ]; then
+            val="compile ($(menu_units count "$eng" patch)/$(menu_flag_count_kind "$eng" patch))"
+            short="c$(menu_units count "$eng" patch)/$(menu_flag_count_kind "$eng" patch)"
+        elif [ "$val" = pull ]; then
+            val=bundled; short=bundled
+        else
+            short=$val
         fi
-    else
-        sep='  |  '
-    fi
-
+        plain="${plain:+$plain  |  }${ENGINE_LABEL[$eng]} $val"
+        out="${out:+$out
+}$eng|$val|$short"
+    done
+    [ $(( ${#plain} + 2 )) -gt "$MENU_COLS" ] && short=1 || short=0
     printf '\n '
-    menu_status_item QEMU "$q" "$c_primary"
-    printf '%s%s%s' "$c_border" "$sep" "$c_reset"
-    menu_status_item OVMF "$o" "$c_accent"
-    printf '%s%s%s' "$c_border" "$sep" "$c_reset"
-    menu_status_item VM "$v" "$c_secondary"
+    local first=1 e v
+    while IFS='|' read -r e v val; do
+        [ "$first" = 1 ] || printf '%s | %s' "$c_border" "$c_reset"
+        first=0
+        [ "$short" = 1 ] && v=$val
+        case "$e" in
+            qemu)         val=$c_primary ;;
+            ovmf)         val=$c_accent ;;
+            virt-manager) val=$c_secondary ;;
+        esac
+        printf '%s%s%s %s%s%s' "$c_bold$val" "${ENGINE_LABEL[$e]}" \
+            "$c_reset" "$c_muted" "$v" "$c_reset"
+    done <<< "$out"
     printf '\n'
 }
 
-menu_key() {
-    printf '%s%s%s%s%s' "$c_bold$c_info" "$1" "$c_reset" "$c_muted" "$2"
-}
-
-menu_range() {
-    case "$menu_page" in
-        1) if [ "$qemu_bin" = compile ]; then printf 'A-E'; else printf 'A'; fi ;;
-        2) if [ "$ovmf_bin" = compile ]; then printf 'A-C'; else printf 'A'; fi ;;
-        3) if [ "$vm_bin" = compile ]; then printf 'A-E'; else printf 'A'; fi ;;
-        4) printf 'A-C' ;;
-        5) printf 'A-D' ;;
-    esac
-}
-
 menu_keys() {
-    local range pages
-    printf ' '
-    if [ "$menu_mode" = link ]; then
-        menu_key '[A]' ' Select option'
-        printf '    '
-        if [ "$menu_page" = 2 ]; then
-            menu_key '[/]' ' Set CODE/VARS path'
-        else
-            menu_key '[/]' ' Set custom path'
-        fi
-        if [ "$menu_blocked" = 0 ]; then
-            printf '    '
-            menu_key '[1-6]' ' Select page'
-        fi
-        printf '\n'
-        return
+    local key eng n last tags label range
+    key=$(menu_page_info key)
+    eng=$(menu_page_info engine)
+    if [ -n "$eng" ]; then
+        n=1
+        [ "$(menu_bin_get "$eng")" = compile ] &&
+            n=$((1 + $(menu_flag_count_kind "$eng" patch)))
+    else
+        n=$(menu_flag_count_kind "$key" tool)
     fi
-    if [ "$menu_page" = 6 ] && ! menu_build_blocked; then
-        menu_key '[Enter]' ' Build'
+    if menu_build_blocked; then last=4; else last=${#PAGES[@]}; fi
+    range=$(menu_letters_end "$n")
+    [ "$n" -gt 1 ] && range="A-$range"
+    printf ' '
+    if [ "$key" != review ]; then
+        if [ "$key" = host ] && menu_build_blocked; then range=A; fi
+        printf '%s[%s]%s%s%s' "$c_bold$c_info" "$range" "$c_reset" \
+            "$c_muted" ' Select option'
         printf '    '
-    elif [ "$menu_page" != 6 ]; then
-        range=$(menu_range)
-        menu_key "[$range]" ' Select option'
-        printf '    '
+    fi
+    if [ "$menu_mode" = link ]; then
+        tags=$(u_path_tags "$eng" "$(menu_bin_flag "$eng")")
+        label=$(printf '%s\n' "$tags" | tr '\n' '/'); label=${label%/}
+        [ -n "$label" ] && printf '%s[/]%s Set %s path%s    ' \
+            "$c_bold$c_info" "$c_reset" "$label" "$c_muted"
+        [ "$menu_blocked" = 1 ] && last=$menu_page
+    fi
+    if [ "$key" = review ]; then
+        printf '%s[Enter]%s Build    ' "$c_bold$c_info" "$c_reset"
     fi
     if [ "$menu_mode" = sudo ]; then
         printf '%s[/]%s Enter sudo password%s' \
             "$c_bold$c_warning" "$c_warning" "$c_reset"
     else
-        pages=$(menu_pages)
-        menu_key "[$pages]" ' Select page'
+        printf '%s[1-%s]%s Select page%s' \
+            "$c_bold$c_info" "$last" "$c_reset" "$c_muted"
     fi
-    printf '\n'
+    printf '%s\n' "$c_reset"
 }
 
-# Render a dynamic patch subsection for an engine.
-# Reads patch metadata from patches/<engine>/ via discover_patches.
-# Populates MENU_KEY_TO_FLAG[letter]="engine|flag" for the key handler.
-menu_render_patches() {
-    local engine="$1" current="$2" opt="$3"
-    local patches count=0 idx=-1 letter letters="BCDEFGHIJKLMNOPQRSTUVWXYZ"
-    local flag name desc deps sel
-    patches=$(discover_patches "$engine")
-    count=$(echo "$patches" | grep -c .)
-    [ "$count" -gt 0 ] || return 0
-    menu_subsection "Patches ($(menu_count "$current")/$count)" "$opt"
-    MENU_KEY_TO_FLAG=()
-    while IFS='|' read -r flag name desc deps tick; do
-        [ -n "$flag" ] || continue
-        idx=$((idx + 1))
-        letter="${letters:$idx:1}"
-        MENU_KEY_TO_FLAG["$letter"]="${engine}|${flag}"
-        sel=0; menu_list_has "$current" "$flag" && sel=1
-        menu_row "[${letter}]" "$name" "$flag" "$(menu_check_mark "$sel")" "$sel"
-        menu_note "$sel" "$desc"
-    done <<< "$patches"
+menu_render_page() {
+    local page eng cli title idx=0 letter kind last="" sel pend bin
+    eng=$(menu_page_info engine)
+    if [ -n "$eng" ]; then page=$eng
+    else page=$(menu_page_info key); fi
+    [ "$page" = review ] && page=after
+    [ -n "$page" ] || return 0
+    if [ -n "$eng" ]; then
+        cli=${ENGINE_CLI[$eng]}
+        title="BUILD ITEMS | ${ENGINE_LABEL[$eng]}"
+        bin=$(menu_bin_get "$eng")
+        idx=1
+    else
+        title=$(menu_page_info tab)
+    fi
+    menu_section "$title"
+    MENU_ACTION=()
+    [ -n "$eng" ] && menu_subsection "Binaries" "--$cli:bin"
+    for f in $(page_flags "$page"); do
+        kind=$(u_kind "$page" "$f")
+        case "$kind" in
+            bin)
+                [ -n "$eng" ] || continue
+                sel=$([ "$bin" = "$f" ] && echo 1 || echo 0)
+                menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
+                    "${U_NAME["$page|$f"]}" "$f" "$(menu_mark radio "$sel")" "$sel"
+                menu_note "$sel" "${U_DESC["$page|$f"]}"
+                [ "$sel" = 1 ] && [ -n "$(u_path_tags "$page" "$f")" ] &&
+                    menu_render_paths "$page" "$f"
+                ;;
+            patch)
+                [ -n "$eng" ] && [ "$bin" = compile ] || continue
+                if [ "$last" != patch ]; then
+                    menu_subsection \
+                        "Patches ($(menu_units count "$eng" patch)/$(menu_flag_count_kind "$eng" patch))" \
+                        "--$cli:patch"
+                    last=patch
+                fi
+                letter="${MENU_LETTERS:$idx:1}"; idx=$((idx + 1))
+                MENU_ACTION["${letter,,}"]="$page|$f|patch"
+                sel=$(u_on "$page" "$f")
+                menu_row "[$letter]" "${U_NAME["$page|$f"]}" "$f" \
+                    "$(menu_mark check "$sel")" "$sel"
+                menu_note "$sel" "${U_DESC["$page|$f"]}"
+                ;;
+            tool)
+                letter="${MENU_LETTERS:$idx:1}"; idx=$((idx + 1))
+                MENU_ACTION["${letter,,}"]="$page|$f|tool"
+                sel=$(u_on "$page" "$f")
+                pend=0
+                [ "$menu_mode" = sudo ] && [ "$menu_sudo_pending" = "$f" ] && pend=1
+                menu_row "[$letter]" "${U_NAME["$page|$f"]}" "$f" \
+                    "$(menu_mark check "$sel")" "$sel" "$pend"
+                menu_note "$sel" "${U_DESC["$page|$f"]}"
+                ;;
+        esac
+    done
 }
 
-menu_render_qemu() {
-    local sel
-    menu_section "BUILD ITEMS | QEMU"
-    menu_subsection "Binaries" "--qemu:bin"
-
-    sel=0; [ "$qemu_bin" = compile ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Compile from upstream" compile "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "(Recommended) Builds a self-contained QEMU with the selected patches."
-
-    sel=0; [ "$qemu_bin" = link ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Link existing binary" link "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Reuse a system QEMU; no patches, virgl profile or vmvga."
-    if [ "$qemu_bin" = link ]; then
-        if menu_path_ok "$qemu_link"; then
-            menu_path_line "Found: $qemu_link" "$(menu_found_colour QEMU)"
+menu_render_paths() {
+    local eng="$1" flag="$2" tags tag val n=0 count
+    tags=$(u_path_tags "$eng" "$flag")
+    count=$(printf '%s\n' "$tags" | grep -c .)
+    for tag in $tags; do
+        n=$((n + 1))
+        val=$(u_path_get "$eng" "$flag" "$tag")
+        if menu_path_ok "$val"; then
+            if [ "$count" -gt 1 ]; then
+                menu_path_line "Found: $tag: $val" "$(menu_found_colour "$tag")"
+            else
+                menu_path_line "Found: $val" "$(menu_found_colour "$tag")"
+            fi
+        elif [ "$count" -gt 1 ]; then
+            menu_path_line "Not found: $tag" "$c_error"
         else
-            menu_path_line "Not found: ${qemu_link:-qemu-system-x86_64}" "$c_error"
+            menu_path_line "Not found: ${val:-$tag}" "$c_error"
         fi
-    fi
-
-    sel=0; [ "$qemu_bin" = skip ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Do not compile" skip "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Install no QEMU; the launcher falls back to PATH."
-
-    if [ "$qemu_bin" = compile ]; then
-        menu_render_patches qemu "$qemu_groups" --qemu:patch
-    fi
-}
-
-menu_render_ovmf() {
-    local sel
-    menu_section "BUILD ITEMS | OVMF"
-    menu_subsection "Binaries" "--ovmf:bin"
-
-    sel=0; [ "$ovmf_bin" = pull ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Pull pre-patched binaries" pull "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Use the silent images bundled with this repository."
-
-    sel=0; [ "$ovmf_bin" = compile ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Compile from upstream" compile "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Build edk2 from the QEMU tarball; works without a QEMU build."
-
-    sel=0; [ "$ovmf_bin" = link ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Link existing CODE + VARS" link "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Symlink a CODE/VARS pair already installed on the host."
-    if [ "$ovmf_bin" = link ]; then
-        if menu_path_ok "$ovmf_code"; then
-            menu_path_line "Found: CODE: $ovmf_code" "$(menu_found_colour CODE)"
-        else
-            menu_path_line "Not found: CODE" "$c_error"
-        fi
-        if menu_path_ok "$ovmf_vars"; then
-            menu_path_line "Found: VARS: $ovmf_vars" "$(menu_found_colour VARS)"
-        else
-            menu_path_line "Not found: VARS" "$c_error"
-        fi
-    fi
-
-    sel=0; [ "$ovmf_bin" = skip ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Do not install firmware" skip "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Leave firmware handling to the host or domain XML."
-
-    if [ "$ovmf_bin" = compile ]; then
-        menu_render_patches ovmf "$ovmf_groups" --ovmf:patch
-    fi
-}
-
-menu_render_vm() {
-    local sel
-    menu_section "BUILD ITEMS | VIRT-MGR"
-    menu_subsection "Binaries" "--virtmgr:bin"
-
-    sel=0; [ "$vm_bin" = compile ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Compile from upstream" compile "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Build the fork with the selected UI patches."
-
-    sel=0; [ "$vm_bin" = link ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Link existing binary" link "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Reuse an installed virt-manager; no patches are applied."
-    if [ "$vm_bin" = link ]; then
-        if menu_path_ok "$vm_link"; then
-            menu_path_line "Found: $vm_link" "$(menu_found_colour virt-manager)"
-        else
-            menu_path_line "Not found: ${vm_link:-virt-manager}" "$c_error"
-        fi
-    fi
-
-    sel=0; [ "$vm_bin" = skip ] && sel=1
-    menu_row "$([ "$sel" = 1 ] && echo '[A]' || echo '   ')" \
-        "Do not compile" skip "$(menu_radio_mark "$sel")" "$sel"
-    menu_note "$sel" "Install no virt-manager; use the host application instead."
-
-    if [ "$vm_bin" = compile ]; then
-        menu_render_patches virt-manager "$vm_groups" --virtmgr:patch
-    fi
-}
-
-menu_render_host() {
-    local sel pend
-    menu_section "HOST / OUTPUT"
-    pend=0
-    [ "$menu_mode" = sudo ] && [ "$menu_sudo_pending" = host ] && pend=1
-    sel="$host_deps"
-    menu_row '[A]' "Install build + runtime dependencies (host-global)" --deps "$(menu_check_mark "$sel")" "$sel" "$pend"
-    menu_note "$sel" "Compiler/meson/ninja + GTK3, libvirt (daemon+client), spice, Vulkan; needs sudo."
-    pend=0
-    [ "$menu_mode" = sudo ] && [ "$menu_sudo_pending" = vfio ] && pend=1
-    sel="$session_vfio"
-    menu_row '[B]' "Session VFIO helper (host-global)" --sessionvfio "$(menu_check_mark "$sel")" "$sel" "$pend"
-    menu_note "$sel" "Install /usr/local/sbin/vmm-vfio-ctl, a udev rule and sudoers entry."
-    sel="$emit_domains"
-    menu_row '[C]' "Write domain XML examples" --writexml "$(menu_check_mark "$sel")" "$sel"
-    menu_note "$sel" "Render cachyos.xml and windows.xml into prefix/share/examples."
+    done
 }
 
 menu_sudo_ok() {
@@ -1262,227 +1122,108 @@ menu_sudo_ok() {
     sudo -n true 2>/dev/null
 }
 
-menu_render_after() {
-    local sel pend
-    menu_section "AFTER BUILD"
-    menu_subsection "Cleanup" "--after:clean"
-    pend=0
-    [ "$menu_mode" = sudo ] && [ "$menu_sudo_pending" = deps ] && pend=1
-    sel="$menu_clean_deps"
-    menu_row '[A]' "Remove build dependencies" deps "$(menu_check_mark "$sel")" "$sel" "$pend"
-    menu_note "$sel" "Runtime dependencies are always kept; only build-only packages are removed."
-    sel="$menu_clean_sources"
-    menu_row '[B]' "Remove sources and downloads" sources "$(menu_check_mark "$sel")" "$sel"
-    menu_note "$sel" "Delete src/ and build/ after a successful build; safe to rebuild later."
 
-    menu_subsection "Miscellany" "--after:misc"
-    sel="$verify"
-    menu_row '[C]' "Verify installation" verify "$(menu_check_mark "$sel")" "$sel"
-    menu_note "$sel" "Check the launcher, QEMU and firmware paths after install."
-    sel="$launchitem"
-    menu_row '[D]' "Create .desktop launcher item" launchitem "$(menu_check_mark "$sel")" "$sel"
-    menu_note "$sel" "Write vmm.desktop so the app appears in the desktop menu."
-}
-
-menu_summary() {
-    local label="$1" colour="$2" value="$3"
-    local indent='       ' avail line part first=1
-    local -a parts
-    avail=$((MENU_COLS - 22))
-    [ "$avail" -lt 12 ] && avail=12
-    if [ "${#value}" -le "$avail" ]; then
-        printf '%s%-14s %s%s%s\n' "$indent" "$label" "$colour" "$value" "$c_reset"
-        return
-    fi
-    IFS=',' read -r -a parts <<< "$value"
-    if [ "${#parts[@]}" -le 1 ]; then
-        while [ "${#value}" -gt "$avail" ]; do
-            printf '%s%-14s %s%s%s\n' "$indent" "$label" "$colour" "${value:0:avail}" "$c_reset"
-            label=""
-            value="${value:avail}"
-        done
-        printf '%s%-14s %s%s%s\n' "$indent" "$label" "$colour" "$value" "$c_reset"
-        return
-    fi
-    line="${parts[0]}"
-    for part in "${parts[@]:1}"; do
-        if [ $(( ${#line} + 1 + ${#part} )) -gt "$avail" ]; then
-            if [ "$first" = 1 ]; then
-                printf '%s%-14s %s%s%s\n' "$indent" "$label" "$colour" "$line" "$c_reset"
-                first=0
-            else
-                printf '%s               %s%s%s\n' "$indent" "$colour" "$line" "$c_reset"
-            fi
-            line="$part"
-        else
-            line="$line,$part"
-        fi
+menu_render_review() {
+    local eng clean="" misc="" host="" c_deps nbuild nrun depstr
+    for eng in $(page_flags after); do
+        [ "$(u_kind after "$eng")$(u_on after "$eng")" = tool1 ] || continue
+        case "$eng" in *clean*) clean="${clean:+$clean,}$eng" ;;
+            *) misc="${misc:+$misc,}$eng" ;; esac
     done
-    if [ "$first" = 1 ]; then
-        printf '%s%-14s %s%s%s\n' "$indent" "$label" "$colour" "$line" "$c_reset"
-    else
-        printf '%s               %s%s%s\n' "$indent" "$colour" "$line" "$c_reset"
-    fi
-}
+    for eng in $(page_flags host); do
+        [ "$(u_kind host "$eng")$(u_on host "$eng")" = tool1 ] &&
+            host="${host:+$host,}$eng"
+    done
+    nbuild=$(menu_deps_missing); nrun=$DEP_MISSING_RUNTIME
+    if [ "$nbuild" -gt 0 ] || [ "$nrun" -gt 0 ]; then c_deps=$c_error; else c_deps=$c_success; fi
+    if [ "$host_deps" = 1 ]; then depstr="install (build+runtime)"
+    elif [ "$nbuild" -gt 0 ] || [ "$nrun" -gt 0 ]; then depstr=missing
+    else depstr=ok; fi
 
-menu_render_command() {
-    local args=() a clean="" misc="" flag value i=0 n tail
-    case "$qemu_bin" in
-        compile) args+=("--qemu:bin=compile" \
-            "--qemu:patch=$(menu_qemu_display "$qemu_groups")") ;;
-        link) args+=("--qemu:bin=link:$qemu_link") ;;
-        skip) args+=("--qemu:bin=skip") ;;
-    esac
-    case "$ovmf_bin" in
-        pull) args+=("--ovmf:bin=pull") ;;
-        link) args+=("--ovmf:bin=link" "--ovmf:code=$ovmf_code" \
-            "--ovmf:vars=$ovmf_vars") ;;
-        compile) args+=("--ovmf:bin=compile" \
-            "--ovmf:patch=$(menu_ovmf_display "$ovmf_groups")") ;;
-        skip) args+=("--ovmf:bin=skip") ;;
-    esac
-    case "$vm_bin" in
-        compile) args+=("--virtmgr:bin=compile" \
-            "--virtmgr:patch=$(menu_vm_display "$vm_groups")") ;;
-        link) args+=("--virtmgr:bin=link:$vm_link") ;;
-        skip) args+=("--virtmgr:bin=skip") ;;
-    esac
-    [ "$host_deps" = 1 ] && args+=("--deps:install" "--deps:runtime")
-    if [ "$menu_clean_sources" = 1 ] && [ "$menu_clean_deps" = 1 ]; then
-        clean=all
-    elif [ "$menu_clean_sources" = 1 ]; then
-        clean=sources
-    elif [ "$menu_clean_deps" = 1 ]; then
-        clean=deps
-    fi
-    args+=("--after:clean=${clean:-none}")
-    [ "$verify" = 1 ] && misc=verify
-    [ "$launchitem" = 1 ] && misc="${misc:+$misc,}launchitem"
-    [ -n "$misc" ] && args+=("--after:misc=$misc")
-    [ "$session_vfio" = 1 ] && args+=("--sessionvfio")
-    [ "$emit_domains" = 1 ] && args+=("--writexml")
+    menu_section "REVIEW & RUN"
+    menu_subsection "Selected"
+    local l v
+    for l in deps cleanup misc prefix; do
+        case "$l" in
+            deps) v=$depstr; colour=$c_deps ;;
+            cleanup) v=${clean:-none}; colour=$c_warning ;;
+            misc) v=${misc:-none}; colour=$c_warning ;;
+            prefix) v=$prefix; colour=$c_text ;;
+        esac
+        menu_folded "       $(printf '%-14s ' "$l")" '                       ' \
+            "$((MENU_COLS - 22))" "$colour" "$v"
+    done
+    [ -n "$host" ] && menu_folded "       $(printf '%-14s ' host)" \
+        '                       ' "$((MENU_COLS - 22))" "$c_warning" "$host"
 
-    printf '       %s%s./install.sh%s %s\\%s\n' \
+    menu_subsection "Command"
+    local args=() a flag value i=0 n tail bin groups tools=() cell tag
+    for eng in "${ENGINES[@]}"; do
+        bin=$(menu_bin_get "$eng"); groups=$(menu_groups_get "$eng")
+        cli=${ENGINE_CLI[$eng]}
+        case "$bin" in
+            compile) args+=("--$cli:bin=compile" "--$cli:patch=$groups") ;;
+            link)
+                cell=""
+                for tag in $(u_path_tags "$eng" link); do
+                    cell="${cell:+$cell;}$tag=$(u_path_get "$eng" link "$tag")"
+                done
+                args+=("--$cli:bin=link:$cell") ;;
+            pull) args+=("--$cli:bin=pull") ;;
+            skip) args+=("--$cli:bin=skip") ;;
+        esac
+    done
+    for a in host after; do
+        for flag in $(page_flags "$a"); do
+            [ "$(u_kind "$a" "$flag")$(u_on "$a" "$flag")" = tool1 ] &&
+                tools+=("$flag")
+        done
+    done
+    [ ${#tools[@]} -gt 0 ] && args+=("--tool=$(IFS=,; printf '%s' "${tools[*]}")")
+    printf '       %s%s./install.sh%s %s\%s\n' \
         "$c_bold" "$c_primary" "$c_reset" "$c_border" "$c_reset"
     n=${#args[@]}
     for a in "${args[@]}"; do
-        i=$((i + 1))
-        if [ "$i" -lt "$n" ]; then tail=' \'; else tail=''; fi
+        i=$((i + 1)); [ "$i" -lt "$n" ] && tail=' \' || tail=''
         case "$a" in
             *[!A-Za-z0-9_./:=+@%,-]*)
                 printf "         '%s'%s\n" "${a//\'/\'\\\'\'}" "$tail" ;;
             --*=*)
                 flag=${a%%=*}; value=${a#*=}
-                printf '         %s%s%s=%s%s%s%s\n' \
-                    "$c_info" "$flag" "$c_reset" \
-                    "$c_success" "$value" "$c_reset" "$tail" ;;
+                printf '         %s%s%s=%s%s%s%s\n' "$c_info" "$flag" \
+                    "$c_reset" "$c_success" "$value" "$c_reset" "$tail" ;;
             *)
                 printf '         %s%s%s%s\n' "$c_info" "$a" "$c_reset" "$tail" ;;
         esac
     done
 }
 
-menu_render_review() {
-    local q o v clean="" misc="" c_deps host="" nbuild nrun depstr
-    menu_section "REVIEW & RUN"
-    case "$qemu_bin" in
-        compile) q="compile ($(menu_qemu_display "$qemu_groups"))" ;;
-        link) q="link $qemu_link" ;;
-        skip) q="skip" ;;
-    esac
-    case "$ovmf_bin" in
-        compile) o="compile ($(menu_ovmf_display "$ovmf_groups"))" ;;
-        link) o="link $ovmf_code + $ovmf_vars" ;;
-        pull) o="bundled images" ;;
-        skip) o="skip" ;;
-    esac
-    case "$vm_bin" in
-        compile) v="compile ($(menu_vm_display "$vm_groups"))" ;;
-        link) v="link $vm_link" ;;
-        skip) v="skip" ;;
-    esac
-    [ "$menu_clean_sources" = 1 ] && clean=sources
-    [ "$menu_clean_deps" = 1 ] && clean="${clean:+$clean,}deps"
-    [ "$verify" = 1 ] && misc=verify
-    [ "$launchitem" = 1 ] && misc="${misc:+$misc,}launchitem"
-    [ "$host_deps" = 1 ] && host="${host:+$host,}deps"
-    [ "$session_vfio" = 1 ] && host="${host:+$host,}sessionvfio"
-    [ "$emit_domains" = 1 ] && host="${host:+$host,}writexml"
-    nbuild=$(menu_deps_missing)
-    nrun=$(runtime_deps_missing)
-    if [ "$nbuild" -gt 0 ] || [ "$nrun" -gt 0 ]; then c_deps="$c_error"; else c_deps="$c_success"; fi
-    if [ "$host_deps" = 1 ]; then
-        depstr="install (build+runtime)"
-    elif [ "$nbuild" -gt 0 ] || [ "$nrun" -gt 0 ]; then
-        depstr="missing"
-    else
-        depstr="ok"
-    fi
-
-    menu_subsection "Selected"
-    menu_summary QEMU "$c_primary" "$q"
-    menu_summary OVMF "$c_accent" "$o"
-    menu_summary virt-manager "$c_secondary" "$v"
-    menu_summary deps "$c_deps" "$depstr"
-    menu_summary cleanup "$c_warning" "${clean:-none}"
-    menu_summary misc "$c_warning" "${misc:-none}"
-    [ -n "$host" ] && menu_summary host "$c_warning" "$host"
-    menu_summary prefix "$c_text" "$prefix"
-
-    menu_subsection "Command"
-    menu_render_command
-}
-
-# Page-level warnings live in the standard warning area at the bottom, not
-# in the page body, so they line up with the QEMU/OVMF notices.
-menu_page_warning() {
-    local n nbuild nrun
-    MENU_PAGE_WARN=""
-    case "$menu_page" in
-        4)
-            if [ "$host_deps" = 0 ]; then
-                n=$(runtime_deps_missing)
-                [ "$n" -gt 0 ] && MENU_PAGE_WARN="  [!]  WARNING: $n missing dependencies required to run virt-manager"
-                n=$(menu_deps_missing)
-                if [ "$n" -gt 0 ]; then
-                    MENU_PAGE_WARN="${MENU_PAGE_WARN:+$MENU_PAGE_WARN
-}  [X]  ERROR: $n missing build dependencies. Grant sudo or remove build items"
-                fi
-            fi ;;
-        5)
-            if [ "$host_deps" = 0 ]; then
-                n=$(menu_deps_missing)
-                [ "$n" -gt 0 ] && MENU_PAGE_WARN="  [!]  WARNING: $n build dependencies missing; install them with [A] on HOST"
-            fi ;;
-        6)
-            if [ "$host_deps" = 0 ]; then
-                nrun=$(runtime_deps_missing)
-                nbuild=$(menu_deps_missing)
-                if [ "$nrun" -gt 0 ]; then
-                    MENU_PAGE_WARN="  [!]  WARNING: $nrun runtime dependencies missing; the app may not start"
-                fi
-                if [ "$nbuild" -gt 0 ]; then
-                    MENU_PAGE_WARN="${MENU_PAGE_WARN:+$MENU_PAGE_WARN
-}  [X]  ERROR: $nbuild missing build dependencies. Grant sudo or remove build items"
-                fi
-            fi ;;
-    esac
-}
-
 menu_render() {
+    local nrun nbuild
+    MENU_PAGE_WARN=""
+    if [ "$host_deps" = 0 ]; then
+        nrun=$DEP_MISSING_RUNTIME
+        case "$menu_page" in
+            4)
+                nbuild=$(menu_deps_missing)
+                [ "$nbuild" -gt 0 ] &&
+                    MENU_PAGE_WARN="  [X]  ERROR: $nbuild missing build dependencies, install or remove compilation items" ;;
+            5|6) ;;
+            *) nrun=0 ;;
+        esac
+        [ "$nrun" -gt 0 ] &&
+            MENU_PAGE_WARN="${MENU_PAGE_WARN:+$MENU_PAGE_WARN
+}  [!]  WARNING: $nrun missing runtime dependencies"
+    fi
     menu_calc_width
     [ -t 1 ] && { clear 2>/dev/null || printf '\033[H\033[2J'; }
     menu_frame
     menu_tabs
-    case "$menu_page" in
-        1) menu_render_qemu ;;
-        2) menu_render_ovmf ;;
-        3) menu_render_vm ;;
-        4) menu_render_host ;;
-        5) menu_render_after ;;
-        6) menu_render_review ;;
-    esac
-    menu_page_warning
+    if [ "$(menu_page_info key)" = review ]; then
+        menu_render_review
+    else
+        menu_render_page
+    fi
     if [ -n "$MENU_PAGE_WARN" ] || [ -n "$menu_warn" ] || [ -n "$menu_error" ]; then
         local line nc prefix rest
         printf '\n'
@@ -1499,7 +1240,6 @@ menu_render() {
             else
                 rest=""
             fi
-            # The notice strings carry their own leading space.
             printf '%s%s%s%s%s\n' \
                 "$c_bold$nc" "$prefix" "$c_reset$nc" "$rest" "$c_reset"
         done <<EOF
@@ -1514,55 +1254,36 @@ EOF
     printf ' %s%sSelect:%s ' "$c_bold" "$c_info" "$c_reset"
 }
 
-menu_term_cooked() {
-    [ -n "$menu_stty" ] && stty "$menu_stty" 2>/dev/null
-    menu_raw=0
-}
-
-menu_term_raw() {
-    if [ -n "$menu_stty" ]; then
-        stty -echo -icanon min 1 time 0 2>/dev/null && menu_raw=1
-    fi
-}
-
-menu_term_done() {
-    [ -n "$menu_stty" ] && stty "$menu_stty" 2>/dev/null
-    menu_raw=0
+menu_term() {
+    case "$1" in
+        init)   menu_stty=$(stty -g 2>/dev/null || true); menu_term raw ;;
+        cooked) [ -n "$menu_stty" ] && stty "$menu_stty" 2>/dev/null; menu_raw=0 ;;
+        done)   menu_term cooked ;;
+        raw)    if [ -n "$menu_stty" ]; then
+                    stty -echo -icanon min 1 time 0 2>/dev/null && menu_raw=1
+                fi ;;
+    esac
 }
 
 # A plain key read must not exit inside the trap: bash's read reasserts the
-# raw settings on the way out and leaves the terminal with echo off.  Set a
-# flag instead and let the render loop restore.  Readline (`read -e`) and
-# sudo handle the signal themselves, so those states exit immediately.
 menu_on_int() {
     if [ "$menu_text_active" = 1 ]; then
-        menu_term_done
+        menu_term done
         printf '\n'
         exit 130
     fi
     menu_signal=1
 }
 
-menu_term_init() {
-    menu_stty=$(stty -g 2>/dev/null || true)
-    menu_term_raw
-}
-
-# While a link option is selected, a missing path is a persistent blocking
-# error: it stays visible (and hides the page keys) until the path is fixed
-# or the user returns to the selector with A.
 menu_link_state() {
-    local missing=""
-    case "$menu_page" in
-        1) menu_path_ok "$qemu_link" || missing=QEMU ;;
-        2)
-            if ! menu_path_ok "$ovmf_code"; then
-                missing=CODE
-            elif ! menu_path_ok "$ovmf_vars"; then
-                missing=VARS
-            fi ;;
-        3) menu_path_ok "$vm_link" || missing=virt-manager ;;
-    esac
+    local eng missing=""
+    eng=$(menu_page_info engine)
+    if ! menu_path_ok "$(menu_link get "$eng" 1)"; then
+        missing=$(menu_link tag "$eng" 1)
+    elif [ "$(menu_link count "$eng")" -ge 2 ] &&
+         ! menu_path_ok "$(menu_link get "$eng" 2)"; then
+        missing=$(menu_link tag "$eng" 2)
+    fi
     if [ -n "$missing" ]; then
         menu_error="  [X]  ERROR: Cannot proceed, fix path to $missing binary or select another option"
         menu_blocked=1
@@ -1573,94 +1294,40 @@ menu_link_state() {
     return 0
 }
 
-# Jumping to a page restores its link editor when that mode is selected, so
 # a blocking path error cannot be lost by navigating away and back.
 menu_page_mode() {
+    local eng
     menu_revert_label=""
     menu_warn=""
     menu_error=""
     MENU_PAGE_WARN=""
-    case "$menu_page" in
-        1)
-            if [ "$qemu_bin" = link ]; then
-                [ -n "$qemu_link" ] ||
-                    qemu_link=$(command -v qemu-system-x86_64 2>/dev/null || true)
-                menu_mode=link
-                menu_link_state || true
-                return
-            fi ;;
-        2)
-            if [ "$ovmf_bin" = link ]; then
-                [ -n "$ovmf_code" ] || ovmf_code=$(ovmf_find_code)
-                [ -n "$ovmf_vars" ] || ovmf_vars=$(ovmf_find_vars)
-                menu_mode=link
-                menu_link_state || true
-                return
-            fi ;;
-        3)
-            if [ "$vm_bin" = link ]; then
-                [ -n "$vm_link" ] ||
-                    vm_link=$(command -v virt-manager 2>/dev/null || true)
-                menu_mode=link
-                menu_link_state || true
-                return
-            fi ;;
-    esac
+    eng=$(menu_page_info engine)
+    if [ -n "$eng" ] && [ "$(menu_bin_get "$eng")" = link ]; then
+        menu_mode=link
+        menu_link_state || true
+        return
+    fi
     menu_mode=normal
     menu_warn=""
     menu_error=""
     menu_blocked=0
 }
 
-menu_cycle_qemu() {
-    case "$qemu_bin" in
-        compile) qemu_bin=link ;;
-        link) qemu_bin=skip ;;
-        skip) qemu_bin=compile ;;
-    esac
+menu_cycle_build() {
+    local eng="$1" modes cur m next="" found=0
+    modes=${BUILD_MODES[$eng]:-}
+    [ -n "$modes" ] || return 0
+    cur=$(menu_bin_get "$eng")
+    for m in $modes; do
+        if [ "$found" = 1 ]; then next=$m; break; fi
+        [ "$m" = "$cur" ] && found=1
+    done
+    [ -n "$next" ] || next=${modes%% *}
+    menu_bin_set "$eng" "$next"
     menu_warn=""
     menu_error=""
     menu_revert_label=""
-    if [ "$qemu_bin" = link ]; then
-        [ -n "$qemu_link" ] || qemu_link=$(command -v qemu-system-x86_64 2>/dev/null || true)
-        menu_mode=link
-        menu_link_state || true
-    else
-        menu_mode=normal
-    fi
-}
-
-menu_cycle_ovmf() {
-    case "$ovmf_bin" in
-        pull) ovmf_bin=compile ;;
-        compile) ovmf_bin=link ;;
-        link) ovmf_bin=skip ;;
-        skip) ovmf_bin=pull ;;
-    esac
-    menu_warn=""
-    menu_error=""
-    menu_revert_label=""
-    if [ "$ovmf_bin" = link ]; then
-        [ -n "$ovmf_code" ] || ovmf_code=$(ovmf_find_code)
-        [ -n "$ovmf_vars" ] || ovmf_vars=$(ovmf_find_vars)
-        menu_mode=link
-        menu_link_state || true
-    else
-        menu_mode=normal
-    fi
-}
-
-menu_cycle_vm() {
-    case "$vm_bin" in
-        compile) vm_bin=link ;;
-        link) vm_bin=skip ;;
-        skip) vm_bin=compile ;;
-    esac
-    menu_warn=""
-    menu_error=""
-    menu_revert_label=""
-    if [ "$vm_bin" = link ]; then
-        [ -n "$vm_link" ] || vm_link=$(command -v virt-manager 2>/dev/null || true)
+    if [ "$next" = link ]; then
         menu_mode=link
         menu_link_state || true
     else
@@ -1672,19 +1339,17 @@ menu_prompt_path() {
     local label="$1" current="$2" out prompt
     printf '\n %s[Enter]%s Confirm %s path\n' "$c_bold$c_info" "$c_reset" "$label"
     # Let readline draw the prompt so backspace stops at the start of the
-    # input instead of erasing the label.  \001/\002 mark the colour
-    # escapes as zero-width.
     printf -v prompt ' \001%s%s\002Text:\001%s\002 ' \
         "$c_bold" "$c_info" "$c_reset"
     menu_text_active=1
-    menu_term_cooked
+    menu_term cooked
     if ! IFS= read -r -e -i "$current" -p "$prompt" out; then
-        menu_term_raw
+        menu_term raw
         menu_text_active=0
         printf '\n'
         return 1
     fi
-    menu_term_raw
+    menu_term raw
     menu_text_active=0
     out=${out#"${out%%[![:space:]]*}"}
     out=${out%"${out##*[![:space:]]}"}
@@ -1696,509 +1361,228 @@ menu_prompt_path() {
     return 0
 }
 
-menu_edit_qemu_path() {
-    local old="$qemu_link"
-    menu_prompt_path "QEMU" "$old" || return
+menu_edit_build_path() {
+    local eng="$1" idx=1 tag old
     menu_warn=""
-    if menu_path_ok "$MENU_TEXT"; then
-        qemu_link=$MENU_TEXT
-        menu_revert_label=""
-        menu_link_state || true
-    elif menu_path_ok "$old"; then
-        menu_revert_label=QEMU
-        menu_warn="  [!]  WARNING: Invalid path, reverting to found QEMU binary"
-        menu_error=""
-        menu_blocked=0
-    else
-        menu_revert_label=""
-        menu_link_state || true
-    fi
-}
-
-menu_edit_vm_path() {
-    local old="$vm_link"
-    menu_prompt_path "virt-manager" "$old" || return
-    menu_warn=""
-    if menu_path_ok "$MENU_TEXT"; then
-        vm_link=$MENU_TEXT
-        menu_revert_label=""
-        menu_link_state || true
-    elif menu_path_ok "$old"; then
-        menu_revert_label=virt-manager
-        menu_warn="  [!]  WARNING: Invalid path, reverting to found virt-manager binary"
-        menu_error=""
-        menu_blocked=0
-    else
-        menu_revert_label=""
-        menu_link_state || true
-    fi
-}
-
-menu_edit_ovmf_path() {
-    local old
-    # A successful pass shows both entry blocks in series: CODE stays on
-    # screen while VARS is open.  If either field is invalid, stop there and
-    # return to the selector with the warning/error instead of continuing.
-    menu_warn=""
-    old=$ovmf_code
-    menu_prompt_path "CODE" "$old" || { menu_link_state || true; return; }
-    if menu_path_ok "$MENU_TEXT"; then
-        ovmf_code=$MENU_TEXT
-        menu_revert_label=""
-    else
-        if menu_path_ok "$old"; then
-            menu_revert_label=CODE
-            menu_warn="  [!]  WARNING: Invalid path, reverting to found CODE binary"
-        else
+    while :; do
+        tag=$(menu_link tag "$eng" "$idx")
+        [ -n "$tag" ] || break
+        old=$(menu_link get "$eng" "$idx")
+        menu_prompt_path "$tag" "$old" || { menu_link_state || true; return; }
+        if menu_path_ok "$MENU_TEXT"; then
+            menu_link set "$eng" "$idx" "$MENU_TEXT"
             menu_revert_label=""
-        fi
-        menu_link_state || true
-        return
-    fi
-
-    old=$ovmf_vars
-    menu_prompt_path "VARS" "$old" || { menu_link_state || true; return; }
-    if menu_path_ok "$MENU_TEXT"; then
-        ovmf_vars=$MENU_TEXT
-        menu_revert_label=""
-    else
-        if menu_path_ok "$old"; then
-            menu_revert_label=VARS
-            menu_warn="  [!]  WARNING: Invalid path, reverting to found VARS binary"
         else
-            menu_revert_label=""
+            if menu_path_ok "$old"; then
+                menu_revert_label=$tag
+                menu_warn="  [!]  WARNING: Invalid path, reverting to found $tag binary"
+            else
+                menu_revert_label=""
+            fi
+            menu_link_state || true
+            return
         fi
-    fi
+        idx=$((idx + 1))
+    done
     menu_link_state || true
 }
 
-menu_link_key() {
+tool_var() {
     case "$1" in
-        a) case "$menu_page" in
-               1) menu_cycle_qemu ;;
-               2) menu_cycle_ovmf ;;
-               3) menu_cycle_vm ;;
-           esac ;;
-        /) case "$menu_page" in
-               1) menu_edit_qemu_path ;;
-               2) menu_edit_ovmf_path ;;
-               3) menu_edit_vm_path ;;
-           esac ;;
-        [1-6])
-            if [ "$menu_blocked" = 0 ]; then
-                menu_page=$1
-                menu_page_mode
-            fi ;;
+        deps)          printf 'host_deps' ;;
+        session-vfio)  printf 'session_vfio' ;;
+        libvirt-access) printf 'libvirt_access' ;;
+        write-xml)     printf 'emit_domains' ;;
+        clean-deps)    printf 'clean_deps' ;;
+        clean-sources) printf 'clean_sources' ;;
+        verify)        printf 'verify' ;;
+        desktop-item)  printf 'launchitem' ;;
     esac
 }
 
-menu_sudo_key() {
-    case "$1" in
-        /)
-            printf '\n'
-            menu_text_active=1
-            menu_term_cooked
-            if sudo -v; then
-                case "$menu_sudo_pending" in
-                    deps) menu_clean_deps=1 ;;
-                    vfio) session_vfio=1 ;;
-                    host) host_deps=1 ;;
-                esac
-                menu_sudo_pending=""
-                menu_mode=normal
-                menu_warn=""
-                menu_error=""
-            else
-                menu_error="  [X]  SUDO ACCESS DENIED: Cannot proceed; fix access or select another option"
-                menu_mode=sudo
-            fi
-            menu_term_raw
-            menu_text_active=0 ;;
-    esac
+tool_set() {
+    local flag="$1" on="$2" v
+    v=$(tool_var "$flag")
+    [ -n "$v" ] && printf -v "$v" '%s' "$on"
 }
 
 menu_handle() {
-    local k="$1" lk pending
+    local k="$1" lk pending entry page flag kind eng
     lk=${k,,}
-    case "$menu_mode" in
-        link) menu_link_key "$lk"; return ;;
-        sudo)
-            if [ "$lk" = / ]; then
-                menu_sudo_key /
-                return
-            fi
-            # Page keys are hidden while an option waits for the password.
-            case "$lk" in
-                [1-6]) return ;;
-            esac
-            # Pressing the pending option again simply deselects it.  Any
-            # other option key abandons the prompt and selects that option.
-            pending="$menu_sudo_pending"
-            menu_sudo_pending=""
-            menu_mode=normal
-            case "$pending:$menu_page:$lk" in
-                host:4:a|vfio:4:b|deps:5:a)
-                    menu_warn=""
-                    menu_error=""
-                    return ;;
-            esac
-            ;;
-    esac
+
+    if [ "$menu_mode" = link ]; then
+        eng=$(menu_page_info engine)
+        case "$lk" in
+            a) [ -n "$eng" ] && menu_cycle_build "$eng" ;;
+            /) [ -n "$eng" ] && menu_edit_build_path "$eng" ;;
+            [1-6])
+                [ "$menu_blocked" = 0 ] &&
+                    { ! menu_build_blocked || [ "$lk" -le 4 ]; } &&
+                    { menu_page=$lk; menu_page_mode; } ;;
+        esac
+        return
+    fi
+
+    if [ "$menu_mode" = sudo ]; then
+        [ "$lk" = / ] || {
+            case "$lk" in [1-6]) return ;; esac
+            pending="$menu_sudo_letter"
+            menu_sudo_pending=""; menu_sudo_page=""; menu_mode=normal
+            [ "$lk" = "$pending" ] && return
+            return
+        }
+        printf '\n'
+        menu_text_active=1; menu_term cooked
+        if sudo -v; then
+            u_set "$menu_sudo_page" "$menu_sudo_pending" 1
+            tool_set "$menu_sudo_pending" 1
+            menu_sudo_pending=""; menu_sudo_page=""; menu_mode=normal
+            menu_warn=""; menu_error=""
+        else
+            menu_error="  [X]  SUDO ACCESS DENIED: Cannot proceed; fix access or select another option"
+            menu_mode=sudo
+        fi
+        menu_term raw; menu_text_active=0
+        return
+    fi
+
     if [ "$k" = $'\n' ] || [ "$k" = $'\r' ]; then
         [ "$menu_page" = 6 ] && MENU_DONE=1
         return
     fi
     case "$lk" in
-        [1-6]) menu_page=$lk; menu_page_mode; return ;;
+        [1-6])
+            if menu_build_blocked && [ "$lk" -ge 4 ]; then
+                [ "$lk" = 4 ] && { menu_page=4; menu_page_mode; }
+                return
+            fi
+            menu_page=$lk; menu_page_mode; return ;;
     esac
-    menu_warn=""
-    menu_error=""
-    case "$menu_page" in
-        1)
-            case "$lk" in
-                a) menu_cycle_qemu ;;
-                b|c|d|e)
-                    if [ "$qemu_bin" = compile ]; then
-                        entry="${MENU_KEY_TO_FLAG[$lk]:-}"
-                        [ -n "$entry" ] && {
-                            engine="${entry%%|*}"
-                            flag="${entry#*|}"
-                            [ "$engine" = qemu ] && menu_toggle_qemu_group "$flag"
-                        }
-                    fi
-                    ;;
-            esac ;;
-        2)
-            case "$lk" in
-                a) menu_cycle_ovmf ;;
-                b|c)
-                    if [ "$ovmf_bin" = compile ]; then
-                        entry="${MENU_KEY_TO_FLAG[$lk]:-}"
-                        [ -n "$entry" ] && {
-                            engine="${entry%%|*}"
-                            flag="${entry#*|}"
-                            [ "$engine" = ovmf ] && menu_toggle_ovmf_group "$flag"
-                        }
-                    fi
-                    ;;
-            esac ;;
-        3)
-            case "$lk" in
-                a) menu_cycle_vm ;;
-                b|c|d|e)
-                    if [ "$vm_bin" = compile ]; then
-                        entry="${MENU_KEY_TO_FLAG[$lk]:-}"
-                        [ -n "$entry" ] && {
-                            engine="${entry%%|*}"
-                            flag="${entry#*|}"
-                            [ "$engine" = virt-manager ] && menu_toggle_vm_group "$flag"
-                        }
-                    fi
-                    ;;
-            esac ;;
-        4)
-            case "$lk" in
-                a)
-                    if [ "$host_deps" = 0 ] && ! menu_sudo_ok; then
-                        menu_sudo_pending=host
-                        menu_mode=sudo
-                    else
-                        host_deps=$((1 - host_deps))
-                    fi ;;
-                b)
-                    if [ "$session_vfio" = 0 ] && ! menu_sudo_ok; then
-                        menu_sudo_pending=vfio
-                        menu_mode=sudo
-                    else
-                        session_vfio=$((1 - session_vfio))
-                    fi ;;
-                c) emit_domains=$((1 - emit_domains)) ;;
-            esac ;;
-        5)
-            case "$lk" in
-                a)
-                    if [ "$menu_clean_deps" = 0 ] && ! menu_sudo_ok; then
-                        menu_sudo_pending=deps
-                        menu_mode=sudo
-                    else
-                        menu_clean_deps=$((1 - menu_clean_deps))
-                    fi ;;
-                b) menu_clean_sources=$((1 - menu_clean_sources)) ;;
-                c) verify=$((1 - verify)) ;;
-                d) launchitem=$((1 - launchitem)) ;;
-            esac ;;
-    esac
+    menu_warn=""; menu_error=""
+    entry="${MENU_ACTION[$lk]:-}"
+    if [ -n "$entry" ]; then
+        IFS='|' read -r page flag kind <<< "$entry"
+        case "$kind" in
+            patch) [ "$(menu_bin_get "$page")" = compile ] &&
+                       menu_toggle_patch_group "$page" "$flag" ;;
+            tool)
+                menu_build_blocked && [ "$flag" != deps ] && return
+                if [ "$(u_on "$page" "$flag")" = 0 ] &&
+                   [ "${U_SUDO["$page|$flag"]}" = yes ] && ! menu_sudo_ok; then
+                    menu_sudo_pending=$flag; menu_sudo_page=$page
+                    menu_sudo_letter=$lk; menu_mode=sudo
+                else
+                    u_toggle "$page" "$flag"
+                    tool_set "$flag" "$(u_on "$page" "$flag")"
+                fi ;;
+        esac
+    elif [ "$lk" = a ] && [ -n "$(menu_page_info engine)" ]; then
+        menu_cycle_build "$(menu_page_info engine)"
+    fi
 }
 
-menu_prepare() {
-    [ -n "$qemu_bin" ] || qemu_bin=compile
-    [ -n "$vm_bin" ] || vm_bin=compile
-    if [ -z "$ovmf_bin" ]; then
-        if [ -f "$DIR/share/firmware/OVMF/OVMF_CODE_4M.fd" ]; then
-            ovmf_bin=pull
+menu_sync() {
+    local dir="$1" eng v gv f page mode v1 v2
+    [ "$dir" = import ] && menu_catalog_init
+    for eng in "${ENGINES[@]}"; do
+        v=${ENGINE_VAR[$eng]}_bin; gv=${v}_given
+        if [ "$dir" = import ]; then
+            mode=${!v:-${BUILD_MODES[$eng]%% *}}
+            [ "$eng" = ovmf ] && [ -z "${!v:-}" ] &&
+                [ ! -f "$DIR/share/firmware/OVMF/OVMF_CODE_4M.fd" ] && mode=compile
+            menu_bin_set "$eng" "$mode"
+            v=${ENGINE_VAR[$eng]}_groups; gv=${v}_given
+            menu_groups_set "$eng" "$([ "${!gv:-0}" = 1 ] &&
+                printf '%s' "$(menu_dedupe "${!v:-}")" || default_groups "$eng")"
         else
-            ovmf_bin=compile
+            printf -v "$v" '%s' "$(menu_bin_get "$eng")"
+            printf -v "$gv" '%s' 1
+            v=${ENGINE_VAR[$eng]}_groups; gv=${v}_given
+            printf -v "$v" '%s' "$(menu_groups_get "$eng")"
+            printf -v "$gv" '%s' 1
+            if [ "$(menu_bin_get "$eng")" = link ]; then
+                v1=${ENGINE_LINK_VAR1[$eng]:-}; v2=${ENGINE_LINK_VAR2[$eng]:-}
+                [ -n "$v1" ] && printf -v "$v1" '%s' "$(menu_link get "$eng" 1)"
+                [ -n "$v2" ] && printf -v "$v2" '%s' "$(menu_link get "$eng" 2)"
+            fi
         fi
-    fi
-    [ "$qemu_bin" = compile ] && [ "$qemu_groups_given" = 0 ] &&
-        qemu_groups=$(default_groups qemu)
-    [ "$vm_bin" = compile ] && [ "$vm_groups_given" = 0 ] &&
-        vm_groups=$(default_groups virt-manager)
-    [ "$ovmf_bin" = compile ] && [ "$ovmf_groups_given" = 0 ] &&
-        ovmf_groups=$(default_groups ovmf)
-    qemu_groups=$(menu_order "$qemu_groups" vmvga spicevirgl gtkegl flexresize)
-    vm_groups=$(menu_order "$vm_groups" reparent pcimenu usbmenu usbcache)
-    ovmf_groups=$(menu_order "$ovmf_groups" nosplash nomessage)
-    [ -n "$qemu_link" ] ||
-        qemu_link=$(command -v qemu-system-x86_64 2>/dev/null || true)
-    [ -n "$vm_link" ] ||
-        vm_link=$(command -v virt-manager 2>/dev/null || true)
-    [ -n "$ovmf_code" ] || ovmf_code=$(ovmf_find_code)
-    [ -n "$ovmf_vars" ] || ovmf_vars=$(ovmf_find_vars)
-    if [ "$clean_given" = 0 ]; then
-        clean_mode=sources
-    fi
-    case "$clean_mode" in
-        sources) menu_clean_sources=1; menu_clean_deps=0 ;;
-        deps) menu_clean_sources=0; menu_clean_deps=1 ;;
-        all) menu_clean_sources=1; menu_clean_deps=1 ;;
-        *) menu_clean_sources=0; menu_clean_deps=0 ;;
-    esac
-    if [ "$misc_given" = 0 ]; then
-        verify=1
-        launchitem=1
-    fi
-    menu_mode=normal
-    menu_warn=""
-    menu_error=""
-    menu_sudo_pending=""
-    menu_blocked=0
-    menu_page_mode
-}
-
-menu_commit() {
-    qemu_bin_given=1; vm_bin_given=1; ovmf_bin_given=1
-    qemu_groups_given=1; vm_groups_given=1; ovmf_groups_given=1
-    clean_given=1; misc_given=1
-    if [ "$menu_clean_sources" = 1 ] && [ "$menu_clean_deps" = 1 ]; then
-        clean_mode=all
-    elif [ "$menu_clean_sources" = 1 ]; then
-        clean_mode=sources
-    elif [ "$menu_clean_deps" = 1 ]; then
-        clean_mode=deps
+    done
+    [ "$dir" = import ] && {
+        [ "$clean_given" = 0 ] && { clean_sources=1; clean_deps=0; }
+        [ "$misc_given" = 0 ] && { verify=1; launchitem=1; }
+        [ "$libvirt_access_given" = 0 ] && libvirt_access=1
+    }
+    for page in host after; do
+        for f in $(page_flags "$page"); do
+            [ "$(u_kind "$page" "$f")" = tool ] || continue
+            v=$(tool_var "$f"); [ -n "$v" ] || continue
+            if [ "$dir" = import ]; then
+                [ "${!v:-0}" = 1 ] && u_set "$page" "$f" 1
+            else
+                printf -v "$v" '%s' "$(u_on "$page" "$f")"
+            fi
+        done
+    done
+    if [ "$dir" = import ]; then
+        menu_mode=normal; menu_warn=""; menu_error=""
+        menu_sudo_pending=""; menu_sudo_page=""; menu_blocked=0
+        menu_page_mode
     else
-        clean_mode=""
-        no_clean=1
-    fi
-    if [ "$host_deps" = 1 ]; then
-        install_deps=1
-        runtime_deps=1
+        clean_given=1; misc_given=1
+        [ "$host_deps" = 1 ] && install_deps=1
     fi
 }
 
 menu_read_key() {
     local k line rc
     if [ "$menu_raw" = 1 ]; then
-        # A timeout lets a trap-installed SIGINT flag break out promptly;
-        # otherwise the interrupted read can be restarted and swallow the
-        # next character the user types after quitting.
         while :; do
-            IFS= read -rsN1 -t 0.2 k
-            rc=$?
+            IFS= read -rsN1 -t 0.2 k; rc=$?
             [ "$rc" = 0 ] && break
             [ "$menu_signal" = 1 ] && return 1
             [ "$rc" -gt 128 ] && continue
             return 1
         done
-        # Swallow an escape sequence (arrows, function keys) instead of
-        # treating its tail as commands.
         if [ "$k" = $'\033' ]; then
             IFS= read -rsn1 -t 0.01 _ 2>/dev/null || true
             IFS= read -rsn1 -t 0.01 _ 2>/dev/null || true
             MENU_KEY=""
-            printf '\n'
-            return 0
+        else
+            MENU_KEY=$k
         fi
-        MENU_KEY=$k
     else
         IFS= read -r line || return 1
-        if [ -z "$line" ]; then
-            MENU_KEY=$'\n'
-        else
-            MENU_KEY=${line:0:1}
-        fi
+        MENU_KEY=${line:0:1}
+        [ -z "$line" ] && MENU_KEY=$'\n'
     fi
     printf '\n'
-    return 0
 }
 
 menu_run() {
-    menu_prepare
-    MENU_DONE=0
-    menu_signal=0
-    menu_term_init
+    deps_scan
+    menu_sync import
+    MENU_DONE=0; menu_signal=0
+    menu_term init
     trap 'menu_on_int' INT
     trap 'menu_signal=1' TERM
-    trap 'menu_term_done' EXIT
+    trap 'menu_term done' EXIT
     while [ "$MENU_DONE" = 0 ]; do
         menu_render
-        if ! menu_read_key; then
-            break
-        fi
+        menu_read_key || break
         [ "$menu_signal" = 1 ] && break
         [ -n "$MENU_KEY" ] && menu_handle "$MENU_KEY"
         [ "$menu_signal" = 1 ] && break
     done
-    menu_term_done
+    menu_term done
     trap - INT TERM EXIT
-    if [ "$menu_signal" = 1 ]; then
-        printf '\n'
-        exit 130
-    fi
-    menu_commit
+    [ "$menu_signal" = 1 ] && { printf '\n'; exit 130; }
+    menu_sync export
     printf '\n'
-}
-
-deps_install() {
-    local id pkgs before after
-    id=$(distro_id)
-    before=$(pkg_snapshot)
-    case "$id" in
-        *arch*)
-            pkgs="base-devel git curl meson ninja pkgconf python gobject-introspection
-                  gtk3 spice-protocol spice spice-gtk libusb libpciaccess libdrm libepoxy
-                  mesa vulkan-icd-loader vulkan-headers libx11 libxkbcommon gettext
-                  libxml2 python-gobject python-cairo libvirt libvirt-glib python-docutils
-                  gtksourceview4 vte3 nasm acpica sdl3 sdl2 glfw glslang"
-            as_root pacman -S --needed --noconfirm $pkgs
-            ;;
-        *debian*|*ubuntu*)
-            pkgs="build-essential git curl meson ninja-build pkg-config python3 python3-venv
-                  libglib2.0-dev libgtk-3-dev libspice-protocol-dev libspice-server-dev
-                  libusb-1.0-0-dev libpciaccess-dev libdrm-dev libepoxy-dev libgbm-dev
-                  libvulkan-dev libx11-dev libxkbcommon-dev gettext libxml2-dev
-                  python3-gi python3-cairo gir1.2-gtk-3.0 gir1.2-libvirt-glib-1.0
-                  gir1.2-spiceclientgtk-3.0 libvirt-daemon-system libvirt-clients
-                  gir1.2-gtksource-4 gir1.2-vte-2.91 python3-docutils nasm acpica-tools
-                  libsdl3-dev libsdl2-dev libglfw3-dev glslang-tools"
-            as_root apt-get update && as_root apt-get install -y $pkgs
-            ;;
-        *fedora*|*rhel*|*centos*)
-            pkgs="gcc gcc-c++ git curl meson ninja-build pkgconf python3-devel glib2-devel
-                  gtk3-devel spice-protocol-devel spice-server-devel libusb1-devel
-                  libpciaccess-devel libdrm-devel libepoxy-devel mesa-libgbm-devel
-                  vulkan-loader-devel libX11-devel libxkbcommon-devel gettext
-                  libxml2-devel python3-gobject python3-cairo libvirt-devel
-                  libvirt-glib-devel gtksourceview4 python3-docutils nasm acpica-tools
-                  SDL3-devel SDL2-devel glfw-devel glslang"
-            as_root dnf install -y $pkgs
-            ;;
-        *)
-            die "unknown distro for --deps:install; install meson, gtk3, spice, virgl and python-gi manually"
-            ;;
-    esac
-    after=$(pkg_snapshot)
-    record_new_deps "$before" "$after"
-}
-
-# Runtime-only check: the deployed prefix loads these at run time, so test
-# sonames (ldconfig) and the GI typelibs rather than -dev pkg-config files.
-
-# ldconfig lives in sbin, which is not on a normal user's PATH on Debian or
-# Arch. Resolve it explicitly; otherwise every soname looks absent.
-ld_cache() {
-    local ld
-    for ld in "$(command -v ldconfig 2>/dev/null)" \
-              /usr/sbin/ldconfig /sbin/ldconfig /usr/bin/ldconfig; do
-        [ -n "$ld" ] && [ -x "$ld" ] || continue
-        "$ld" -p 2>/dev/null && return 0
-    done
-    return 1
-}
-
-have_lib() {
-    local so=$1 d
-    for d in /usr/lib /usr/lib64 /lib /lib64 \
-             /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu \
-             /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu; do
-        [ -e "$d/$so" ] && return 0
-    done
-    return 1
-}
-
-runtime_deps_check() {
-    pkg_missing=()
-    command -v python3 >/dev/null 2>&1 || pkg_missing+=("cmd:python3")
-    if ! command -v libvirtd >/dev/null 2>&1 &&
-       [ ! -x /usr/sbin/libvirtd ] && [ ! -x /usr/bin/libvirtd ]; then
-        pkg_missing+=("libvirtd")
-    fi
-    python3 - <<'PY' 2>/dev/null || pkg_missing+=("python:gi")
-import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("LibvirtGLib", "1.0")
-gi.require_version("SpiceClientGtk", "3.0")
-PY
-    local so cache
-    cache=$(ld_cache) || cache=""
-    for so in libgtk-3.so.0 libspice-client-gtk-3.0.so.5 \
-              libgtksourceview-4.so.0 libvte-2.91.so.0 libvulkan.so.1 \
-              libdrm.so.2 libepoxy.so.0 libSDL2-2.0.so.0 libSDL3.so.0 \
-              libglfw.so.3 libvirt.so.0; do
-        if [ -n "$cache" ]; then
-            printf '%s\n' "$cache" | grep -Fq "$so" || pkg_missing+=("lib:$so")
-        else
-            have_lib "$so" || pkg_missing+=("lib:$so")
-        fi
-    done
-}
-
-runtime_deps_missing() {
-    runtime_deps_check
-    printf '%s' "${#pkg_missing[@]}"
-}
-
-runtime_deps_install() {
-    local id pkgs before after
-    id=$(distro_id)
-    before=$(pkg_snapshot)
-    case "$id" in
-        *arch*)
-            pkgs="python python-gobject python-cairo gtk3 spice-gtk libusb
-                  libpciaccess libdrm libepoxy mesa vulkan-icd-loader libx11
-                  libxkbcommon libxml2 libvirt libvirt-glib gtksourceview4 vte3
-                  sdl3 sdl2 glfw pixman zlib libslirp"
-            as_root pacman -S --needed --noconfirm $pkgs
-            ;;
-        *debian*|*ubuntu*)
-            pkgs="python3 python3-gi python3-cairo gir1.2-gtk-3.0
-                  gir1.2-libvirt-glib-1.0 gir1.2-spiceclientgtk-3.0
-                  gir1.2-gtksource-4 gir1.2-vte-2.91 libgtk-3-0
-                  libspice-client-gtk-3.0-5 libusb-1.0-0 libpciaccess0 libdrm2
-                  libepoxy0 libgbm1 libvulkan1 libx11-6 libxkbcommon0 libxml2
-                  libvirt-daemon-system libvirt-clients libsdl3-0 libsdl2-2.0-0
-                  libglfw3 libpixman-1-0 libslirp0 zlib1g"
-            as_root apt-get update && as_root apt-get install -y $pkgs
-            ;;
-        *fedora*|*rhel*|*centos*)
-            pkgs="python3 python3-gobject python3-cairo gtk3 spice-gtk libusb1
-                  libpciaccess libdrm libepoxy mesa-libgbm vulkan-loader libX11
-                  libxkbcommon libxml2 libvirt libvirt-daemon-kvm
-                  libvirt-daemon-config-network libvirt-glib gtksourceview4
-                  vte291 SDL2 SDL3 glfw pixman zlib libslirp"
-            as_root dnf install -y $pkgs
-            ;;
-        *)
-            die "unknown distro for --deps:runtime; install GTK3, python3-gi, libvirt and Vulkan manually"
-            ;;
-    esac
-    after=$(pkg_snapshot)
-    record_new_deps "$before" "$after" "$RUNTIME_STATE" "--deps:runtime"
 }
 
 menu_needed=0
 if [ -t 0 ] && [ "$dry_run" = 0 ] && [ "$update" = 0 ] && [ "$list" = 0 ] &&
-   [ -z "$clean_mode" ] &&
+   [ "$clean_sources$clean_deps" = 00 ] &&
    [ "$qemu_bin_given$vm_bin_given$ovmf_bin_given" != 111 ]; then
     if [ "$component_given" = 1 ] || [ "$other_action" = 0 ]; then
         menu_needed=1
@@ -2208,7 +1592,6 @@ if [ "$menu_needed" = 1 ]; then
     menu_run
 fi
 
-# Bundled firmware remains the default for a component run.
 if [ -z "$ovmf_bin" ] && [ -n "$qemu_bin$vm_bin" ]; then
     if [ -f "$DIR/share/firmware/OVMF/OVMF_CODE_4M.fd" ]; then
         ovmf_bin=pull
@@ -2221,54 +1604,36 @@ finalize_modes
 validate_paths
 
 if [ -z "$qemu_bin$vm_bin$ovmf_bin" ] && \
-   [ "$install_deps" = 0 ] && [ "$runtime_deps" = 0 ] && [ "$session_vfio" = 0 ] && \
+   [ "$install_deps" = 0 ] && [ "$session_vfio" = 0 ] && \
    [ "$emit_domains" = 0 ] && [ "$update" = 0 ] && \
    [ "$verify" = 0 ] && [ "$launchitem" = 0 ] && \
-   [ -z "$clean_mode" ]; then
+   [ "$clean_sources" = 0 ] && [ "$clean_deps" = 0 ]; then
     note "nothing selected (see --help)"
     exit 0
 fi
 
-if [ "$runtime_deps" = 1 ]; then
-    note "installing runtime dependencies"
-    runtime_deps_install
-fi
-
 if [ "$install_deps" = 1 ]; then
-    note "installing build dependencies"
-    deps_install
+    note "installing build and runtime dependencies"
+    run_tool deps --install build,runtime
+    DEPS_SCANNED=0
 fi
 
-if [ "$vm_bin" = compile ]; then
-    pkg_missing=()
-    vm_deps_check
-    if [ ${#pkg_missing[@]} -gt 0 ]; then
-        note "missing dependencies: ${pkg_missing[*]}"
-        die "rerun with --deps:install or install the packages above"
-    fi
+deps_scan
+
+if [ "$vm_bin" = compile ] && [ "$DEP_MISSING_VM" -gt 0 ]; then
+    die "$DEP_MISSING_VM missing build dependencies for virt-manager; install them or rerun with the deps tool"
 fi
 
-if [ "$qemu_bin" = compile ]; then
-    pkg_missing=()
-    deps_check
-    if [ ${#pkg_missing[@]} -gt 0 ]; then
-        note "missing dependencies: ${pkg_missing[*]}"
-        die "rerun with --deps:install or install the packages above"
-    fi
+if [ "$qemu_bin" = compile ] && [ "$DEP_MISSING_QEMU" -gt 0 ]; then
+    die "$DEP_MISSING_QEMU missing build dependencies for qemu; install them or rerun with the deps tool"
 fi
 
-if [ "$ovmf_mode" = build ]; then
-    pkg_missing=()
-    ovmf_deps_check
-    if [ ${#pkg_missing[@]} -gt 0 ]; then
-        note "missing OVMF dependencies: ${pkg_missing[*]}"
-        die "install nasm/acpica-tools or rerun with --deps:install"
-    fi
+if [ "$ovmf_mode" = build ] && [ "$DEP_MISSING_OVMF" -gt 0 ]; then
+    die "$DEP_MISSING_OVMF missing build dependencies for OVMF; install them or rerun with the deps tool"
 fi
 
 mkdir -p "$BUILD" "$DL" "$SRC"
 
-# --------------------------------------------------------------------- sources
 
 fetch() {
     local url="$1" dest="$2"
@@ -2285,29 +1650,26 @@ source_ok() {
 
 mark_source() { printf '%s\n' "$2" > "$1/.vmm-ref"; }
 
-fetch_vm() {
-    local dir="$SRC/virt-manager-$vm_lock" ref="$vm_lock+$enable_vm"
+fetch_source() {
+    local name="$1" dir="$2" ref="$3" tb="$4" url="$5" builddir="$6"
     if source_ok "$dir" "$ref"; then return 0; fi
-    rm -rf "$dir" "$BUILD/vm-build"
-    local tb="$DL/virt-manager-$vm_lock.tar.gz"
-    fetch "$(conf_get virt-manager file)" "$tb"
-    mkdir -p "$dir"
-    tar -xzf "$tb" -C "$dir" --strip-components=1
-    mark_source "$dir" "$ref"
-    note "virt-manager $vm_lock extracted"
-}
-
-fetch_qemu() {
-    local dir="$SRC/qemu-$qemu_lock" ref="$qemu_lock+$enable_qemu" url
-    if source_ok "$dir" "$ref"; then return 0; fi
-    rm -rf "$dir" "$BUILD/qemu-build"
-    local tb="$DL/$qemu_file"
-    url="$(conf_get qemu url)/$qemu_file"
+    rm -rf "$dir" "$BUILD/$builddir"
     fetch "$url" "$tb"
     mkdir -p "$dir"
     tar -xf "$tb" -C "$dir" --strip-components=1
     mark_source "$dir" "$ref"
-    note "qemu $qemu_lock extracted"
+    note "$name $ref extracted"
+}
+
+fetch_vm() {
+    fetch_source virt-manager "$SRC/virt-manager-$vm_lock" \
+        "$vm_lock+$enable_vm" "$DL/virt-manager-$vm_lock.tar.gz" \
+        "$(conf_get virt-manager file)" vm-build
+}
+
+fetch_qemu() {
+    fetch_source qemu "$SRC/qemu-$qemu_lock" "$qemu_lock+$enable_qemu" \
+        "$DL/$qemu_file" "$(conf_get qemu url)/$qemu_file" qemu-build
 }
 
 git_checkout() {
@@ -2321,10 +1683,6 @@ git_checkout() {
     mark_source "$dir" "$want"
 }
 
-fetch_vmvga() {
-    git_checkout vmvga "$(conf_get vmvga url)" "$vmvga_lock" "$SRC/qemu-vmvga" "overlay"
-}
-
 fetch_virgl() {
     local dir="$SRC/virglrenderer"
     git_checkout virglrenderer "$(conf_get virglrenderer url)" "$virgl_lock" "$dir" "venus"
@@ -2333,35 +1691,47 @@ fetch_virgl() {
     fi
 }
 
-# ---------------------------------------------------------------- builds
 
-build_qemu() {
-    [ -d "$SRC/qemu-$qemu_lock" ] || die "missing qemu source"
-    DXVK_TARBALL="$("$DIR/tools/build-dxvk.sh" "$SRC/dxvk" "$dxvk_lock" \
-        "$BUILD" "$DL/dxvk-native-${dxvk_lock#v}.tar.gz" \
-        "${DXVK_URL:-}")" || die "dxvk-native build failed"
-    export VMM_CFLAGS VMM_CXXFLAGS
-    local log="$BUILD/logs/qemu-build.log"
-    mkdir -p "$(dirname "$log")"
-    # shellcheck disable=SC2086
-    QEMU_GROUPS="$qemu_groups" \
-        "$DIR/tools/build-qemu.sh" "$prefix/qemu" "$SRC/qemu-$qemu_lock" "$SRC/qemu-vmvga" \
-        "$SRC/virglrenderer" "$DXVK_TARBALL" 2>&1 | tee "$log" | filter_output
-    note "qemu profile at $prefix/qemu"
+build_env() {
+    export VMM_SRC="$SRC" VMM_BUILD="$BUILD" VMM_PREFIX="$prefix" \
+           VMM_JOBS="$jobs"
 }
 
-build_ovmf() {
-    local edk2="$SRC/qemu-$qemu_lock/roms/edk2"
-    section "firmware"
-    [ -d "$edk2/OvmfPkg" ] || die "edk2 snapshot missing from the QEMU tarball"
-    export VMM_CFLAGS VMM_CXXFLAGS
-    local log="$BUILD/logs/ovmf-build.log"
-    mkdir -p "$(dirname "$log")"
-    OVMF_GROUPS="$ovmf_groups" \
-        "$DIR/tools/build-ovmf.sh" "$edk2" "$BUILD/ovmf" 2>&1 | tee "$log" | filter_output || die "OVMF build failed"
+build_component() {
+    local eng="$1" groups label log rc=0
+    case "$eng" in
+        qemu)
+            [ -d "$SRC/qemu-$qemu_lock" ] || die "missing qemu source"
+            local dxvk
+            if [ -n "$dxvk_tarball" ]; then
+                dxvk=$dxvk_tarball
+                [ -f "$dxvk" ] || die "no such tarball: $dxvk"
+            else
+                dxvk=$("$DIR/tools/build.sh" dxvk) || die "dxvk-native build failed"
+            fi
+            export VMM_DXVK_TARBALL="$dxvk"
+            export VMM_PREFIX="$prefix/qemu"
+            groups=$qemu_groups; label="qemu" ;;
+        virt-manager) groups=$vm_groups; label="virt-manager" ;;
+        ovmf)
+            section "firmware"
+            [ -d "$SRC/qemu-$qemu_lock/roms/edk2/OvmfPkg" ] ||
+                die "edk2 snapshot missing from the QEMU tarball"
+            groups=$ovmf_groups; label="OVMF" ;;
+        *) die "unknown build component '$eng'" ;;
+    esac
+    build_env
+    log="$BUILD/logs/$eng-build.log"
+    mkdir -p "${log%/*}"
+    env -i PATH="$PATH" HOME="${HOME:-/root}" \
+        VMM_ROOT="$DIR" VMM_SRC="$SRC" VMM_BUILD="$BUILD" \
+        VMM_PREFIX="$prefix" VMM_JOBS="$jobs" \
+        "$DIR/tools/build.sh" build "$eng" --patch="$groups" >"$log" 2>&1 || rc=$?
+    cat "$log"
+    [ "${rc:-0}" = 0 ] || die "$label build failed"
+    [ "$eng" = qemu ] && note "qemu profile at $prefix/qemu"
 }
 
-# ------------------------------------------------------------------- launchers
 
 install_firmware() {
     case "$ovmf_mode" in
@@ -2403,7 +1773,6 @@ build_embed_shim() {
         flags=$(pkg-config --cflags --libs x11 2>/dev/null || true)
     fi
     [ -n "$flags" ] || flags=-lX11
-    # flags intentionally split: pkg-config yields a list.
     # shellcheck disable=SC2086
     if "$cc" -O2 -fPIC -shared -o "$out" "$src" $flags -pthread; then
         note "embed shim: $out"
@@ -2415,107 +1784,11 @@ build_embed_shim() {
 
 install_launchers() {
     mkdir -p "$prefix/bin" "$prefix/libexec" "$prefix/state" "$prefix/run"
-    # Generate the launcher into the prefix.  It is not shipped as a source
-    # file: a single installed launcher avoids the duplicate root/prefix copies.
-    cat > "$prefix/launch.sh" <<'LAUNCH'
-#!/bin/bash
-# Launch the VMM virt-manager fork from this prefix.
-set -u
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREFIX="$DIR"
-# When launch.sh is copied to the install root (filesystems without symlink
-# support), the real prefix lives alongside it; cd into it so relative
-# profile/config paths and the desktop Exec= rewrite resolve correctly.
-if [ -d "$DIR/prefix" ]; then
-    cd "$DIR/prefix" || exit 1
-    PREFIX="$(pwd)"
-fi
-QEMU="$PREFIX/qemu"
-
-[ -f "$PREFIX/profile.conf" ] && . "$PREFIX/profile.conf"
-
-# Keep the desktop entry pointing here after the prefix is moved.  The
-# entry lives outside the tree (XDG data dir) and install.sh writes it with
-# an absolute path, so re-point it at this copy on startup.  No-op when the
-# entry is absent (launchitem was not selected) or already correct.
-desktop="${XDG_DATA_HOME:-$HOME/.local/share}/applications/vmm.desktop"
-if [ -f "$desktop" ] && ! grep -qxF "Exec=$PREFIX/launch.sh" "$desktop"; then
-    tmp="$desktop.vmm.$$"
-    if awk -v ex="Exec=$PREFIX/launch.sh" '
-        BEGIN { done = 0 }
-        /^Exec=/ { print ex; done = 1; next }
-        { print }
-        END { if (!done) print ex }
-    ' "$desktop" > "$tmp" 2>/dev/null; then
-        mv -f "$tmp" "$desktop"
-    else
-        rm -f "$tmp"
-    fi
-fi
-
-if [ ! -x "$PREFIX/bin/virt-manager" ]; then
-    echo "launch: no virt-manager in $PREFIX/bin; run ./install.sh --virtmgr:bin=compile" >&2
-    exit 1
-fi
-
-export GSETTINGS_SCHEMA_DIR="$PREFIX/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
-export PYTHONPATH="$PREFIX/share/virt-manager${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="$QEMU/lib:$QEMU/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-[ -x "$QEMU/libexec/virgl_render_server" ] &&
-    export RENDER_SERVER_EXEC_PATH="$QEMU/libexec/virgl_render_server"
-
-if [ -z "${VK_DRIVER_FILES:-}" ]; then
-    for f in /usr/share/vulkan/icd.d/*.json; do
-        [ -e "$f" ] || continue
-        case "$f" in *lvp_*|*virtio*) ;; *)
-            VK_DRIVER_FILES="${VK_DRIVER_FILES:+$VK_DRIVER_FILES:}$f" ;;
-        esac
-    done
-    export VK_DRIVER_FILES
-fi
-
-if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    if [ "${GDK_BACKEND:-}" != "x11" ]; then
-        echo "launch: Wayland session detected; forcing GDK_BACKEND=x11" >&2
-        echo "launch: X11 reparent needs XWayland, and scaling is per-monitor" >&2
-    fi
-    export GDK_BACKEND=x11
-fi
-
-RUN_DIR="${VMM_RUN_DIR:-$PREFIX/run}"
-mkdir -p "$RUN_DIR" "$PREFIX/state"
-exec 9>"$RUN_DIR/instance.lock"
-if ! flock -n 9; then
-    echo "launch: already running" >&2
-    if command -v wmctrl >/dev/null; then
-        wmctrl -a "Virtual Machine" 2>/dev/null || true
-    elif command -v xdotool >/dev/null; then
-        xdotool search --name "Virtual Machine" windowactivate 2>/dev/null || true
-    fi
-    exit 0
-fi
-
-if [ ! -x "$PREFIX/qemu/bin/qemu-system-x86_64" ] &&
-   [ ! -x "$PREFIX/state/qemu" ] &&
-   ! command -v qemu-system-x86_64 >/dev/null; then
-    echo "launch: no QEMU configured; run ./install.sh --qemu:bin=compile" >&2
-fi
-
-# Render and define the domains from profile.conf before virt-manager starts.
-# The renderer absolutises relative disks each run, fills a missing UUID once
-# and resolves name/uuid collisions; set VMM_NO_DEFINE=1 to skip.
-if [ -z "${VMM_NO_DEFINE:-}" ] && [ -x "$PREFIX/bin/vmm-render" ] &&
-   [ -f "$PREFIX/profile.conf" ] && command -v virsh >/dev/null 2>&1; then
-    "$PREFIX/bin/vmm-render" --define ||
-        echo "launch: domain define failed; continuing" >&2
-fi
-
-exec "$PREFIX/bin/virt-manager" "$@"
-LAUNCH
-    chmod 0755 "$prefix/launch.sh"
+    install -m 0755 "$DIR/share/launch.sh" "$prefix/launch.sh" ||
+        die "cannot install launcher"
     ensure_front_links
-    install -m 0755 "$DIR/tools/vmm-qemu-launcher.sh" "$prefix/bin/vmm-qemu"
-    install -m 0755 "$DIR/tools/vmm-profile-render.sh" "$prefix/bin/vmm-render"
+    install -m 0755 "$DIR/share/bin/vmm-qemu" "$prefix/bin/vmm-qemu"
+    install -m 0755 "$DIR/share/bin/vmm-render" "$prefix/bin/vmm-render"
     build_embed_shim
     if [ "$vm_bin" = link ]; then
         note "linking virt-manager from $vm_link"
@@ -2529,259 +1802,34 @@ EOF
     install_firmware
     install_examples
     if [ ! -f "$prefix/profile.conf" ]; then
-        if [ -f "$DIR/share/examples/profile.conf.in" ]; then
-            install -m 0644 "$DIR/share/examples/profile.conf.in" "$prefix/profile.conf"
-        else
-            cat > "$prefix/profile.conf" <<'EOF'
-# Sourced by launch.sh and bin/vmm-qemu.  Keep to KEY=value lines.
-QEMU_GTK_REFRESH_RATE=60
-# VK_DRIVER_FILES=/usr/share/vulkan/icd.d/your_driver.json
-EOF
-        fi
+        install -m 0644 "$DIR/share/examples/profile.conf.in" "$prefix/profile.conf" ||
+            die "missing $DIR/share/examples/profile.conf.in"
     fi
 }
 
-# Domain XML templates and the profile template travel with the prefix; the
 # launcher renders from these copies, never from the source tree.
 install_examples() {
-    [ -d "$DIR/share/examples" ] || return 0
-    mkdir -p "$prefix/share/examples" || {
-        warn "cannot create $prefix/share/examples"
-        return 0
-    }
-    cp -f "$DIR/share/examples/"*.xml.in "$prefix/share/examples/" 2>/dev/null || true
-    [ -f "$DIR/share/examples/profile.conf.in" ] &&
-        cp -f "$DIR/share/examples/profile.conf.in" "$prefix/share/examples/profile.conf.in"
-    return 0
+    local src="$DIR/share/examples" dst="$prefix/share/examples"
+    [ -d "$src" ] || return 0
+    mkdir -p "$dst" || { warn "cannot create $dst"; return 0; }
+    cp -f "$src/"*.xml.in "$dst/" 2>/dev/null || true
+    [ -f "$src/profile.conf.in" ] &&
+        cp -f "$src/profile.conf.in" "$dst/profile.conf.in"
 }
 
 # Front scripts live at the install root and point into the tree. The copy
 # branch covers filesystems without symlink support (NTFS, SMB2).
-front_link() {
-    local rel=$1 dst=$2
-    rm -f "$dst" 2>/dev/null || true
-    if ln -s "$rel" "$dst" 2>/dev/null; then
-        return 0
-    elif cp -f "$ROOT/$rel" "$dst" 2>/dev/null && chmod 0755 "$dst"; then
-        return 0
-    fi
-    warn "cannot link or copy $dst"
-    return 1
-}
-
 ensure_front_links() {
+    local rel="$prefix/launch.sh" dst="$ROOT/launch.sh"
     [ "$ROOT" = "$DIR" ] && return 0
-    [ -x "$prefix/launch.sh" ] || return 0
-    front_link "$prefix/launch.sh" "$ROOT/launch.sh"
+    [ -x "$rel" ] || return 0
+    rm -f "$dst" 2>/dev/null || true
+    ln -s "$rel" "$dst" 2>/dev/null && return 0
+    cp -f "$DIR/$rel" "$dst" 2>/dev/null && chmod 0755 "$dst" && return 0
+    warn "cannot link or copy $dst"
 }
 
-install_desktop_item() {
-    [ -x "$prefix/launch.sh" ] || {
-        warn "no launcher at $prefix/launch.sh; skipping desktop item"
-        return 0
-    }
-    local dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-    mkdir -p "$dir" || { warn "cannot create $dir"; return 0; }
-    cat > "$dir/vmm.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Virtual Machine Manager (VMM)
-Comment=Launch the VMM QEMU/virt-manager profile
-Exec=$prefix/launch.sh
-Icon=virt-manager
-Terminal=false
-Categories=System;Emulator;
-EOF
-    note "wrote $dir/vmm.desktop"
-}
 
-verify_install() {
-    local rc=0
-    section "verify"
-    if [ -x "$prefix/bin/vmm-qemu" ]; then
-        "$prefix/bin/vmm-qemu" -version 2>/dev/null | head -1 || rc=1
-    fi
-    if [ -x "$prefix/launch.sh" ]; then
-        note "launcher: $prefix/launch.sh"
-    else
-        warn "launcher missing: $prefix/launch.sh"
-        rc=1
-    fi
-    case "$ovmf_mode" in
-        skip|"") ;;
-        *)
-            for f in OVMF_CODE_4M.fd OVMF_VARS_4M.fd; do
-                [ -e "$prefix/firmware/OVMF/$f" ] ||
-                    { warn "firmware missing: $prefix/firmware/OVMF/$f"; rc=1; }
-            done
-            ;;
-    esac
-    if [ -e "$prefix/state/qemu" ] || [ -d "$prefix/qemu" ]; then
-        note "qemu: $prefix/state/qemu"
-    fi
-    [ "$rc" = 0 ] && note "verify: ok" || warn "verify: issues above"
-    return 0
-}
-
-# -------------------------------------------------------------------- cleanup
-
-cleanup_sources() {
-    local found=0
-    if [ -d "$SRC" ]; then
-        note "removing source cache: $SRC"
-        rm -rf "$SRC" || warn "could not remove $SRC"
-        found=1
-    fi
-    if [ -d "$BUILD" ]; then
-        note "removing build outputs and downloads: $BUILD"
-        rm -rf "$BUILD" || warn "could not remove $BUILD"
-        found=1
-    fi
-    [ "$found" = 0 ] && note "no sources or build outputs to remove"
-}
-
-installed_new_deps() {
-    local id pkg
-    id=$(distro_id)
-    [ -f "$DEPS_STATE" ] || return 0
-    while IFS= read -r pkg; do
-        [ -n "$pkg" ] || continue
-        case "$id" in
-            *arch*)
-                pacman -Qq "$pkg" >/dev/null 2>&1 && printf '%s\n' "$pkg" ;;
-            *debian*|*ubuntu*)
-                dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null |
-                    grep -q 'install ok installed' && printf '%s\n' "$pkg" ;;
-            *fedora*|*rhel*|*centos*)
-                rpm -q "$pkg" >/dev/null 2>&1 && printf '%s\n' "$pkg" ;;
-        esac
-    done < "$DEPS_STATE"
-}
-
-cleanup_deps() {
-    [ -f "$DEPS_STATE" ] ||
-        { note "no build packages recorded from --deps:install"; return 0; }
-    local id rc=0
-    local -a pkgs=()
-    local -A keep=()
-    local pkg
-    # Runtime dependencies are never removed; they are needed to run the
-    # prefix long after the build.  Build dependencies that doubled as
-    # runtime deps are therefore excluded here too.
-    if [ -f "$RUNTIME_STATE" ]; then
-        while IFS= read -r pkg; do
-            [ -n "$pkg" ] && keep["$pkg"]=1
-        done < "$RUNTIME_STATE"
-    fi
-    while IFS= read -r pkg; do
-        [ -n "$pkg" ] || continue
-        [ -n "${keep[$pkg]:-}" ] && continue
-        pkgs+=("$pkg")
-    done < <(installed_new_deps)
-    if [ ${#pkgs[@]} -eq 0 ]; then
-        note "no build-only packages to remove (runtime dependencies kept)"
-        rm -f "$DEPS_STATE"
-        return 0
-    fi
-    note "removing ${#pkgs[@]} build package(s) added by --deps:install"
-    note "runtime dependencies are kept"
-    id=$(distro_id)
-    case "$id" in
-        *arch*)
-            as_root pacman -Rns --noconfirm "${pkgs[@]}" || rc=$? ;;
-        *debian*|*ubuntu*)
-            as_root apt-get remove --purge -y "${pkgs[@]}" || rc=$? ;;
-        *fedora*|*rhel*|*centos*)
-            as_root dnf remove -y "${pkgs[@]}" || rc=$? ;;
-        *)
-            warn "unknown distro; remove manually: ${pkgs[*]}"
-            return 1 ;;
-    esac
-    if [ "$rc" = 0 ]; then
-        rm -f "$DEPS_STATE"
-    else
-        warn "package cleanup incomplete; $DEPS_STATE kept for a retry"
-    fi
-    return "$rc"
-}
-
-offer_cleanup() {
-    local ans
-    if [ "$no_clean" = 1 ]; then
-        note "build sources kept at $BUILD"
-        return 0
-    fi
-    if [ ! -t 0 ]; then
-        note "build sources kept at $BUILD"
-        [ -s "$DEPS_STATE" ] &&
-            note "new packages recorded in $DEPS_STATE; remove with --after:clean=deps"
-        return 0
-    fi
-    printf '\n'
-    if [ -d "$BUILD" ]; then
-        read -r -p "Remove build sources and downloads now? [y/N] " ans
-        case "$ans" in [yY]*) cleanup_sources ;; esac
-    fi
-    if [ -s "$DEPS_STATE" ]; then
-        printf 'Packages added by --deps:install:\n%s\n' "$(sed 's/^/  /' "$DEPS_STATE")"
-        read -r -p "Remove them too? The installed prefix may need them at runtime. [y/N] " ans
-        case "$ans" in [yY]*) cleanup_deps ;; esac
-    fi
-}
-
-# -------------------------------------------------------------------- optional
-
-install_vfio() {
-    [ -f "$DIR/tools/vmm-vfio-ctl" ] ||
-        die "--sessionvfio: tools/vmm-vfio-ctl is not present"
-    note "installing vfio helper (host-global, opt-in)"
-    install -d /usr/local/sbin
-    install -m 0755 "$DIR/tools/vmm-vfio-ctl" /usr/local/sbin/vmm-vfio-ctl
-    cat > /etc/sudoers.d/vmm-vfio <<'EOF'
-# Installed by VMM-git --sessionvfio. Grants device bind/unbind only.
-%libvirt ALL=(root) NOPASSWD: /usr/local/sbin/vmm-vfio-ctl
-EOF
-    chmod 0440 /etc/sudoers.d/vmm-vfio
-    cat > /etc/udev/rules.d/60-vmm-vfio.rules <<'EOF'
-SUBSYSTEM=="vfio", MODE="0666"
-EOF
-    udevadm control --reload-rules 2>/dev/null || true
-    note "vfio helper installed; this grants libvirt-group users device control"
-}
-
-emit_domains() {
-    local render="$prefix/bin/vmm-render"
-    install_examples || return 0
-
-    if [ ! -x "$render" ] && [ -f "$DIR/tools/vmm-profile-render.sh" ]; then
-        mkdir -p "$prefix/bin"
-        install -m 0755 "$DIR/tools/vmm-profile-render.sh" "$render" ||
-            { warn "cannot install vmm-render"; return 0; }
-    fi
-    [ -x "$render" ] || {
-        warn "vmm-render missing; cannot emit domain examples"
-        return 0
-    }
-    if [ ! -f "$prefix/profile.conf" ] && [ -f "$prefix/share/examples/profile.conf.in" ]; then
-        install -m 0644 "$prefix/share/examples/profile.conf.in" "$prefix/profile.conf" ||
-            warn "cannot create $prefix/profile.conf"
-    fi
-    [ -f "$prefix/profile.conf" ] || {
-        warn "no profile at $prefix/profile.conf; nothing emitted"
-        return 0
-    }
-
-    note "rendering domain examples from $prefix/profile.conf"
-    "$render" --profile "$prefix/profile.conf" --prefix "$prefix" \
-        --write "$prefix/share/examples" ||
-        warn "some domain examples failed to render"
-
-    grep -l '@[A-Z_][A-Z0-9_]*@' "$prefix/share/examples"/*.xml 2>/dev/null |
-        while read -r tmpl; do warn "unsubstituted placeholders in $tmpl"; done
-    note "domain examples are under $prefix/share/examples; launch.sh defines them"
-}
-
-# ----------------------------------------------------------------------- main
 
 update_locks() {
     python3 - "$CONF" <<'PY'
@@ -2823,7 +1871,6 @@ def git_ref(url, ref):
             return line.split()[0]
     raise SystemExit('cannot resolve %s %s' % (url, ref))
 
-# virt-manager: newest vX.Y.Z tag
 tags = json.loads(curl('https://api.github.com/repos/virt-manager/virt-manager/tags?per_page=100'))
 tag = max((t['name'] for t in tags if re.match(r'^v\d+\.\d+\.\d+$', t['name'])), key=vkey)
 if tag != get('virt-manager', 'lock'):
@@ -2833,18 +1880,15 @@ if tag != get('virt-manager', 'lock'):
 put('virt-manager', 'lock_commit',
     git_ref(get('virt-manager', 'url'), 'refs/tags/%s^{}' % tag))
 
-# qemu: newest stable release tarball
 listing = curl('https://download.qemu.org/')
 vers = sorted({m.group(1) for m in re.finditer(r'qemu-(\d+\.\d+\.\d+)\.tar\.xz', listing)}, key=vkey)
 if vers:
     put('qemu', 'lock', vers[-1])
     put('qemu', 'lock_file', 'qemu-%s.tar.xz' % vers[-1])
 
-# git heads
 put('vmvga', 'lock', git_ref(get('vmvga', 'url'), 'refs/heads/' + get('vmvga', 'ref')))
 put('virglrenderer', 'lock', git_ref(get('virglrenderer', 'url'), 'HEAD'))
 
-# dxvk: latest release tag, annotated tag dereferenced
 rel = json.loads(curl('https://api.github.com/repos/doitsujin/dxvk/releases/latest'))
 dtag = rel['tag_name']
 put('dxvk-native', 'lock', dtag)
@@ -2872,26 +1916,15 @@ fi
 
 if [ "$vm_bin" = compile ]; then
     fetch_vm
-    vm_groups_args=()
-    vm_ifs="$IFS"
-    IFS=','
-    for g in $enable_vm; do
-        [ -n "$g" ] && vm_groups_args+=("$g")
-    done
-    IFS="$vm_ifs"
-    "$DIR/tools/build-vm.sh" "$SRC/virt-manager-$vm_lock" "$BUILD/vm-build" \
-        "$prefix" "$jobs" "${vm_groups_args[@]}" ||
-        die "virt-manager build failed"
+    build_component virt-manager
 fi
 
-# QEMU sources also carry roms/edk2, so OVMF compilation can run without a
-# QEMU build (for example when QEMU is linked or skipped).
 if [ "$qemu_bin" = compile ] || [ "$ovmf_mode" = build ]; then
     fetch_qemu
 fi
 
 if [ "$ovmf_mode" = build ]; then
-    build_ovmf
+    build_component ovmf
 fi
 
 if [ "$qemu_bin" = link ]; then
@@ -2902,35 +1935,42 @@ fi
 
 if [ "$qemu_bin" = compile ]; then
     rm -f "$prefix/state/qemu"
-    if menu_list_has "$qemu_groups" vmvga; then
-        fetch_vmvga
-    fi
     fetch_virgl
-    build_qemu || die "qemu build failed"
+    build_component qemu
 fi
 
 if [ "$qemu_bin" = compile ] || [ "$qemu_bin" = link ] ||
    [ "$vm_bin" = compile ] || [ "$vm_bin" = link ]; then
     install_launchers || die "launcher install failed"
-    "$DIR/tools/relocate-prefix.sh" "$prefix" || die "prefix relocation failed"
+    [ "$libvirt_access" = 1 ] && run_tool libvirt-access
+    "$DIR/share/bin/vmm-relocate" "$prefix" || die "prefix relocation failed"
+    if command -v virsh >/dev/null 2>&1 &&
+       [ -x "$prefix/bin/vmm-render" ] && [ -f "$prefix/profile.conf" ]; then
+        "$prefix/bin/vmm-render" --define ||
+            warn "could not define domains; launch will retry"
+    fi
 elif [ -n "$ovmf_mode" ]; then
     mkdir -p "$prefix"
     install_firmware
 fi
-[ "$session_vfio" = 1 ] && install_vfio
+[ "$session_vfio" = 1 ] && run_tool session-vfio
 ensure_front_links
-[ "$emit_domains" = 1 ] && emit_domains
-[ "$verify" = 1 ] && verify_install
-[ "$launchitem" = 1 ] && install_desktop_item
+[ "$emit_domains" = 1 ] && run_tool write-xml
+[ "$verify" = 1 ] && run_tool verify
+[ "$launchitem" = 1 ] && run_tool desktop-item
 
-if [ -n "$clean_mode" ]; then
-    case "$clean_mode" in
-        sources) cleanup_sources ;;
-        deps) cleanup_deps ;;
-        all) cleanup_sources; cleanup_deps ;;
-    esac
-elif [ -n "$qemu_bin$vm_bin$ovmf_bin" ]; then
-    offer_cleanup
+if [ "$clean_sources" = 1 ] || [ "$clean_deps" = 1 ]; then
+    [ "$clean_sources" = 1 ] && run_tool clean-sources
+    if [ "$clean_deps" = 1 ]; then
+        if [ -s "$DEPS_STATE" ]; then
+            run_tool clean-deps
+        else
+            note "no build packages recorded; nothing to remove"
+        fi
+    fi
+fi
+if [ "$clean_sources" = 0 ] && [ -d "$BUILD" ]; then
+    note "build sources kept at $BUILD"
 fi
 
 note "done"

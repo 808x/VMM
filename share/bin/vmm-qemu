@@ -9,6 +9,8 @@ PREFIX="$(dirname "$BIN")"
 
 if [ -x "$PREFIX/state/qemu" ]; then
     QEMU="$PREFIX/state/qemu"
+elif [ -x "$PREFIX/bin/qemu-system-x86_64" ]; then
+    QEMU="$PREFIX/bin/qemu-system-x86_64"
 elif [ -x "$PREFIX/qemu/bin/qemu-system-x86_64" ]; then
     QEMU="$PREFIX/qemu/bin/qemu-system-x86_64"
 else
@@ -21,9 +23,9 @@ fi
 # vhost-user helper descriptors name the binary without a path.
 export PATH="$PREFIX/qemu/bin:$PREFIX/qemu/libexec${PATH:+:$PATH}"
 
-export LD_LIBRARY_PATH="$PREFIX/qemu/lib:$PREFIX/qemu/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-[ -x "$PREFIX/qemu/libexec/virgl_render_server" ] &&
-    export RENDER_SERVER_EXEC_PATH="$PREFIX/qemu/libexec/virgl_render_server"
+export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+[ -x "$PREFIX/libexec/virgl_render_server" ] &&
+    export RENDER_SERVER_EXEC_PATH="$PREFIX/libexec/virgl_render_server"
 [ -f "$PREFIX/libexec/qemu-embed-shim.so" ] &&
     export LD_PRELOAD="$PREFIX/libexec/qemu-embed-shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
 
@@ -39,8 +41,11 @@ fi
 
 # libvirtd strips the session environment; the gtk,gl=on display needs X.
 export DISPLAY="${DISPLAY:-:0.0}"
-export XAUTHORITY="${XAUTHORITY:-${HOME:-}/.Xauthority}"
+owner=$(stat -c %U "$PREFIX" 2>/dev/null || id -un)
+export XAUTHORITY="${XAUTHORITY:-/home/$owner/.Xauthority}"
 export GDK_BACKEND=x11
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 export VIRTMGR_HIDE_WINDOW=1
 
 if [ -d "$PREFIX/qemu/share/qemu" ]; then

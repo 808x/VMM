@@ -1,8 +1,9 @@
+# VMM_PAGE: virt-manager
 # VMM_FLAG: usb-cache
 # VMM_NAME: USB device cache
 # VMM_DESC: Work around the spice-gtk GI ownership bug.
-# VMM_DEPS: -
 # VMM_TICK: yes
+# VMM_INSTALL: modules/usb_redirect.py:virtManager
 --- a/virtManager/details/viewers.py
 +++ b/virtManager/details/viewers.py
 @@ -552,6 +552,10 @@
