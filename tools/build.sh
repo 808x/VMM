@@ -242,23 +242,28 @@ patch_scan() {
     done <<< "$out"
 }
 
-patch_rel() {
-    local eng="${1:-}" want="${2:-}" out kind page flag name desc deps path tick post sudo
-    out=$(unit_scan_page patch "$eng" "$PATCH_ROOT") || exit 1
+# One field lookup for any record kind/page/flag.  patch_rel, patch_deps and
+# --query used to each rescan the whole page and re-parse it with awk.
+unit_row() {
+    local kind="$1" page="$2" want="$3" field="$4"
+    local root="$PATCH_ROOT" out k pg flag name desc deps path tick post sudo
+    [ "$kind" = tool ] && root="$TOOL_ROOT"
+    out=$(unit_scan_page "$kind" "$page" "$root") || exit 1
     [ -n "$out" ] || return 0
-    while IFS='|' read -r kind page flag name desc deps path tick post sudo; do
-        [ "$flag" = "$want" ] && { printf '%s\n' "$path"; return 0; }
+    while IFS='|' read -r k pg flag name desc deps path tick post sudo; do
+        [ "$flag" = "$want" ] || continue
+        case "$field" in
+            kind|page|flag|name|desc|deps|path|tick|post|sudo)
+                printf '%s\n' "${!field}" ;;
+            *) die "unknown record field '$field'" ;;
+        esac
+        return 0
     done <<< "$out"
+    return 0
 }
 
-patch_deps() {
-    local eng="${1:-}" want="${2:-}" out kind page flag name desc deps path tick post sudo
-    out=$(unit_scan_page patch "$eng" "$PATCH_ROOT") || exit 1
-    [ -n "$out" ] || return 0
-    while IFS='|' read -r kind page flag name desc deps path tick post sudo; do
-        [ "$flag" = "$want" ] && { printf '%s\n' "$deps"; return 0; }
-    done <<< "$out"
-}
+patch_rel()  { unit_row patch "${1:-}" "${2:-}" path; }
+patch_deps() { unit_row patch "${1:-}" "${2:-}" deps; }
 
 # Resolve FLAGS plus everything they list in VMM_DEPS.  One flag per line.
 patch_resolve() {
@@ -468,14 +473,7 @@ query() {
                 printf '%s\n' "$rel"
                 ;;
             name|desc|deps|tick)
-                val=$(patch_scan "$eng" | awk -F'|' -v f="$g" -v c="$field" '
-                    $1 == f {
-                        if (c == "name") print $2
-                        else if (c == "desc") print $3
-                        else if (c == "deps") print $4
-                        else print $5
-                        exit
-                    }')
+                val=$(unit_row patch "$eng" "$g" "$field")
                 [ -n "$val" ] || die "unknown $eng patch flag '$g'"
                 printf '%s\n' "$val"
                 ;;
