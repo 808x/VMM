@@ -43,7 +43,6 @@ install_deps=0
 install_deps=0
 session_vfio=0
 libvirt_access=1
-libvirt_access_given=0
 emit_domains=0
 verify=0
 launchitem=0
@@ -52,8 +51,6 @@ dry_run=0
 list=0
 clean_sources=0
 clean_deps=0
-clean_given=0
-misc_given=0
 prefix="$ROOT/prefix"
 # tree was copied (no symlinks) the prefix may instead be under src/.  All path
 if [ -d "$SELF_DIR/prefix" ]; then
@@ -520,7 +517,6 @@ while [ $# -gt 0 ]; do
                 v=$(tool_var "$t")
                 [ -n "$v" ] || die "--tool: unknown item '$t' (see --help)"
                 printf -v "$v" '%s' 1
-                [ "$t" = libvirt-access ] && libvirt_access_given=1
             done
             shift ;;
         --update) update=1; shift ;;
@@ -1426,11 +1422,17 @@ menu_sync() {
             fi
         fi
     done
-    [ "$dir" = import ] && {
-        [ "$clean_given" = 0 ] && { clean_sources=1; clean_deps=0; }
-        [ "$misc_given" = 0 ] && { verify=1; launchitem=1; }
-        [ "$libvirt_access_given" = 0 ] && libvirt_access=1
-    }
+    if [ "$dir" = import ]; then
+        # VMM_TICK is the only default-on mechanism, for patches and tools.
+        for page in host after; do
+            for f in ${PAGE_UNITS[$page]:-}; do
+                [ "$(u_kind "$page" "$f")" = tool ] || continue
+                [ "${U_TICK[$page|$f]:-no}" = yes ] || continue
+                v=$(tool_var "$f"); [ -n "$v" ] || continue
+                printf -v "$v" '%s' 1
+            done
+        done
+    fi
     for page in host after; do
         for f in ${PAGE_UNITS[$page]:-}; do
             [ "$(u_kind "$page" "$f")" = tool ] || continue
@@ -1447,7 +1449,6 @@ menu_sync() {
         menu_sudo_pending=""; menu_sudo_page=""; menu_blocked=0
         menu_page_mode
     else
-        clean_given=1; misc_given=1
         [ "$install_deps" = 1 ] && install_deps=1
     fi
 }

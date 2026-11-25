@@ -3,6 +3,7 @@
 # VMM_FLAG: libvirt-access
 # VMM_NAME: Grant libvirt access to this prefix
 # VMM_VAR: libvirt_access
+# VMM_TICK: yes
 # VMM_PHASE: define
 # VMM_DESC: Fix AppArmor rules, parent traversal and prefix ownership so libvirtd can launch the compiled QEMU.
 # VMM_SUDO: yes

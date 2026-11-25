@@ -3,6 +3,7 @@
 # VMM_FLAG: desktop-item
 # VMM_NAME: Create .desktop launcher item
 # VMM_VAR: launchitem
+# VMM_TICK: yes
 # VMM_PHASE: post
 # VMM_DESC: Write vmm.desktop so the app appears in the desktop menu.
 set -eu

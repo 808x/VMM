@@ -133,15 +133,13 @@ unit_scan_page() {
         [ -n "${seen[$flag]:-}" ] &&
             die "duplicate $kind flag '$flag' in $page (${seen[$flag]} and $rel)"
         seen[$flag]="$rel"
-        if [ "$kind" = patch ]; then
+        deps=""; post=no; sudo=no
+        [ "$kind" = patch ] && {
             deps=$(header_field "$f" VMM_DEPS)
             [ "$deps" = "-" ] && deps=""
-            tick=$(unit_bool no "$(header_field "$f" VMM_TICK)" "$rel")
-            post=no
-            sudo=no
-        else
-            deps=""
-            tick=no
+        }
+        tick=$(unit_bool no "$(header_field "$f" VMM_TICK)" "$rel")
+        if [ "$kind" = tool ]; then
             post=$(unit_bool yes "$(header_field "$f" VMM_POST)" "$rel")
             sudo=$(unit_bool no "$(header_field "$f" VMM_SUDO)" "$rel")
         fi

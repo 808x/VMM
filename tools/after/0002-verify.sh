@@ -3,6 +3,7 @@
 # VMM_FLAG: verify
 # VMM_NAME: Verify installation
 # VMM_VAR: verify
+# VMM_TICK: yes
 # VMM_PHASE: post
 # VMM_DESC: Check the launcher, QEMU and firmware paths after install.
 set -eu
