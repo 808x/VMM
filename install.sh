@@ -1705,7 +1705,7 @@ install_launchers() {
         die "cannot install launcher"
     ensure_front_links
     install -m 0755 "$DIR/share/bin/vmm-qemu" "$prefix/bin/vmm-qemu"
-    install -m 0755 "$DIR/share/bin/vmm-render" "$prefix/bin/vmm-render"
+    install -m 0755 "$DIR/share/bin/vmm-define" "$prefix/bin/vmm-define"
     build_embed_shim
     if [ "$vm_bin" = link ]; then
         note "linking virt-manager from $vm_link"
@@ -1862,8 +1862,8 @@ if [ "$qemu_bin" = compile ] || [ "$qemu_bin" = link ] ||
     run_tools_phase define
     "$DIR/share/bin/vmm-relocate" "$prefix" || die "prefix relocation failed"
     if command -v virsh >/dev/null 2>&1 &&
-       [ -x "$prefix/bin/vmm-render" ] && [ -f "$prefix/profile.conf" ]; then
-        "$prefix/bin/vmm-render" --define ||
+       [ -x "$prefix/bin/vmm-define" ] && [ -f "$prefix/profile.conf" ]; then
+        "$prefix/bin/vmm-define" --define ||
             warn "could not define domains; launch will retry"
     fi
 elif [ -n "$ovmf_mode" ]; then

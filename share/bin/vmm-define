@@ -11,7 +11,7 @@
 # moved tree keeps working.
 #
 # Usage:
-#   vmm-render --profile FILE --prefix DIR [--write DIR] [--define] [--list]
+#   vmm-define --profile FILE --prefix DIR [--write DIR] [--define] [--list]
 #
 #   --write DIR   also write each rendered domain as DIR/<template>.xml
 #   --define      define each rendered domain with virsh, fixing name/uuid
@@ -28,9 +28,9 @@ DEFINE=0
 SYNC=0
 LIST=0
 
-die() { printf 'vmm-render: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'vmm-render: %s\n' "$*" >&2; }
-note() { printf 'vmm-render: %s\n' "$*"; }
+die() { printf 'vmm-define: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'vmm-define: %s\n' "$*" >&2; }
+note() { printf 'vmm-define: %s\n' "$*"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$PREFIX" ]; then
-    # Installed at $PREFIX/bin/vmm-render.
+    # Installed at $PREFIX/bin/vmm-define.
     PREFIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 [ -n "$PROFILE" ] || PROFILE="$PREFIX/profile.conf"
@@ -78,7 +78,7 @@ save_state() {
         warn "cannot write $STATE_FILE"
 }
 
-tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/vmm-render.XXXXXX") || die "mktemp failed"
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/vmm-define.XXXXXX") || die "mktemp failed"
 trap 'rm -rf "$tmpdir"' EXIT
 
 # Per-field state in profile.conf, so sync can honour the three-way rule:

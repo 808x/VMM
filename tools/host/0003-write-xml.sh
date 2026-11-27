@@ -11,7 +11,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 root=$(vmm_root)
 prefix=$(vmm_prefix)
-render="$prefix/bin/vmm-render"
+render="$prefix/bin/vmm-define"
 
 # Standalone calls may not have a prefix yet; seed it from the tree copies.
 if [ -d "$root/share/examples" ]; then
@@ -24,12 +24,12 @@ if [ -d "$root/share/examples" ]; then
     fi
 fi
 
-if [ ! -x "$render" ] && [ -f "$root/share/bin/vmm-render" ]; then
+if [ ! -x "$render" ] && [ -f "$root/share/bin/vmm-define" ]; then
     mkdir -p "$prefix/bin"
-    install -m 0755 "$root/share/bin/vmm-render" "$render" ||
-        die "cannot install vmm-render"
+    install -m 0755 "$root/share/bin/vmm-define" "$render" ||
+        die "cannot install vmm-define"
 fi
-[ -x "$render" ] || die "vmm-render missing; cannot emit domain examples"
+[ -x "$render" ] || die "vmm-define missing; cannot emit domain examples"
 
 if [ ! -f "$prefix/profile.conf" ] &&
    [ -f "$prefix/share/examples/profile.conf.in" ]; then

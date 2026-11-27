@@ -76,7 +76,7 @@ Use `--prefix=DIR` to install somewhere other than `./prefix`.
 ### The desktop
 
 - The first install defines each domain from its template **once**, then writes the real UUID back into `profile.conf`. Existing domains are never redefined, so their disks and device topology stay yours.
-- Each launch runs `vmm-render --sync` against session libvirt before starting virt-manager. It updates only value nodes — memory, emulator, firmware paths, MAC, NIC and disk source — preserving identity, devices and `qemu:arg` lines.
+- Each launch runs `vmm-define --sync` against session libvirt before starting virt-manager. It updates only value nodes — memory, emulator, firmware paths, MAC, NIC and disk source — preserving identity, devices and `qemu:arg` lines.
 - Set `VMM_NO_SYNC=1` to skip the sync step.
 
 ### `profile.conf`
@@ -168,7 +168,7 @@ tools/build.sh          patch discovery/order, engine builds, dxvk staging
 tools/upstreams.conf    pinned URLs, floors and locks
 patches/                one directory per engine; metadata in file headers
 share/examples/         profile.conf.in and the two domain templates
-share/bin/              vmm-qemu, vmm-render
+share/bin/              vmm-qemu, vmm-define
 share/vendor/           dxvk-native prebuilt tarball, embed shim source
 share/firmware/OVMF/    bundled firmware
 src/ build/ state/      runtime caches (not part of the shipped package)
@@ -182,7 +182,7 @@ prefix/
   profile.conf              local values; edited by sync on blank fields
   bin/virt-manager          patched fork
   bin/vmm-qemu              libvirt emulator wrapper
-  bin/vmm-render            template renderer and two-way sync
+  bin/vmm-define            template renderer and two-way sync
   bin/qemu-system-x86_64    QEMU 11.1.3 + patches
   lib/                      virglrenderer + dxvk-native 3.1.1 (prebuilt)
   libexec/                  virgl_render_server, qemu-embed-shim.so

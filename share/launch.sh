@@ -103,9 +103,9 @@ fi
 # Slot the current profile.conf values into the existing domain definitions.
 # The template is only used at install time for the first define; launch never
 # rebuilds a domain from it.
-if [ -z "${VMM_NO_SYNC:-}" ] && [ -x "$PREFIX/bin/vmm-render" ] &&
+if [ -z "${VMM_NO_SYNC:-}" ] && [ -x "$PREFIX/bin/vmm-define" ] &&
    [ -f "$PREFIX/profile.conf" ] && command -v virsh >/dev/null 2>&1; then
-    "$PREFIX/bin/vmm-render" --sync ||
+    "$PREFIX/bin/vmm-define" --sync ||
         echo "launch: profile sync failed; continuing" >&2
 fi
 
