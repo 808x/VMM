@@ -71,7 +71,7 @@ GIB=1048576
 MEM_SLACK=1000
 HOST_RESERVE=$(( (GIB + MEM_SLACK) * 2 ))
 # Cap guest RAM well below physical RAM: venus/blob add shared host pages.
-GUEST_CAP=$(( 8 * GIB ))
+GUEST_CAP=$(( 12 * GIB ))
 TOTAL_MEM=$(free -k | awk '/^Mem:/ {print $2}')
 
 # VM1 ceiling: half the host minus a host reserve, 4 GiB floor.
