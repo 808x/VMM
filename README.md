@@ -20,7 +20,7 @@
   </tr>
   <tr>
     <td><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b>: virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</td>
-    <td><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows desktop and Task Manager"><br><b>Windows</b>: vmvga with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. The guest also runs 808x/portable-apps — note the self-contained app folders and the sandbox tools in the context menu.</td>
+    <td><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows desktop and Task Manager"><br><b>Windows 11</b>: VMware SVGA 3D with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. Portabilized app collection from <a href="https://github.com/808x/portable-apps">808x/portable-apps</a> in context menu.</td>
   </tr>
 </table>
 
