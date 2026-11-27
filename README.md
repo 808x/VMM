@@ -1,26 +1,26 @@
-<p align="center"><img src="assets/vmm-mark.svg" width="140" alt="VMM mark"></p>
+<p align="center"><img src="assets/logo.svg" width="140" alt="VMM logo"></p>
 <h1 align="center">VMM</h1>
 <p align="center">A portable, self-contained virt-manager desktop with a patched QEMU display stack — one VM for CachyOS with <code>virtio-vga-gl</code>/venus, one for Windows with <code>vmvga</code> and DXVK.</p>
 
-<p align="center"><img src="assets/screenshots/01-console.svg" width="100%" alt="VMM console with an embedded QEMU GTK window"></p>
+<p align="center"><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows guest embedded in the VMM console, with Task Manager showing dynamic memory"></p>
+<p align="center"><sub>Windows on vmvga + DXVK; Task Manager shows 8.2 / 13.5 GB — the 60% boot allocation from the dynamic profile. The desktop also shows <a href="https://github.com/808x/portable-apps">808x/portable-apps</a>: self-contained app packages and the sandbox context menu.</sub></p>
 
 ---
 
 ## Screens
 
-The images below are placeholders. Drop real screenshots into `assets/screenshots/` under the same names, or point the `<img>` tags at your own captures.
-
 <table>
   <tr>
-    <td width="50%"><img src="assets/screenshots/02-pcie-menu.svg" alt="PCIe hotplug menu"><br><b>PCIe hotplug</b>: a curated submenu for redirecting host PCI devices into a stopped guest, including a picker that hides boot and mounted devices.</td>
-    <td width="50%"><img src="assets/screenshots/03-usb-menu.svg" alt="USB hotplug menu"><br><b>USB hotplug</b>: a submenu backed by a device cache that works around spice-gtk's GI ownership bug.</td>
+    <td width="50%"><img src="assets/screenshots/tui.png" width="100%" alt="Installer TUI on the HOST page"><br><b>Installer TUI</b>: six pages (QEMU, OVMF, virt-manager, HOST, AFTER, REVIEW). Missing build dependencies show a persistent error; sudo-gated rows ask once through sudo's own prompt.</td>
+    <td width="50%"><img src="assets/screenshots/dynamic_profile.png" width="100%" alt="profile.conf with dynamic memory and vCPU formulas"><br><b>Dynamic profile</b>: memory ceiling, boot allocation, vCPU count and venus hostmem are computed from the host. Blank fields are filled back from the live domain on sync.</td>
   </tr>
   <tr>
-    <td><img src="assets/screenshots/04-cachyos-gl.svg" alt="CachyOS with virtio-vga-gl"><br><b>CachyOS</b>: virtio-vga-gl with venus/blob globals and a GL console embedded in the detail window.</td>
-    <td><img src="assets/screenshots/05-windows-vmvga.svg" alt="Windows with vmvga"><br><b>Windows</b>: vmvga with DXVK, host-driven resolution and a reparented GTK display, with SPICE channels kept for USB and the agent.</td>
+    <td><img src="assets/screenshots/menu_pcie.png" width="100%" alt="PCIe hotplug submenu"><br><b>PCIe hotplug</b>: a curated submenu that hides boot displays and mounted filesystems; here only the RTX A2000 is pre-selected.</td>
+    <td><img src="assets/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection.</td>
   </tr>
   <tr>
-    <td colspan="2"><img src="assets/screenshots/06-installer.svg" alt="Installer menu"><br><b>Installer</b>: a six-page terminal menu (QEMU, OVMF, virt-manager, host, after, review). Every row is backed by a flag, and the review page shows the exact command line.</td>
+    <td><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b>: virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</td>
+    <td><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows desktop and Task Manager"><br><b>Windows</b>: vmvga with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. The guest also runs 808x/portable-apps — note the self-contained app folders and the sandbox tools in the context menu.</td>
   </tr>
 </table>
 
@@ -216,5 +216,7 @@ VMM is free software under the [GNU GPL v2 or later](LICENSE). Third-party compo
 - **[doitsujin/dxvk](https://github.com/doitsujin/dxvk)** — zlib/libpng license. The prebuilt dxvk-native 3.1.1 libraries used by the vmvga D3D path.
 - **[virgl/virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer)** — MIT. Venus/virgl support for the CachyOS GL console.
 - **EDK II / OVMF** — BSD-2-Clause-Patent. Firmware images and the silent-boot patches.
+
+The Windows screenshot also shows [808x/portable-apps](https://github.com/808x/portable-apps), a separate project for self-contained app packages and sandbox integration.
 
 VMM is an independent project and is not affiliated with QEMU, virt-manager, Red Hat or the dxvk authors.
