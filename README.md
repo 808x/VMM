@@ -45,7 +45,23 @@ Everything runs against **session libvirt** (`qemu:///session`); no system-wide 
 
 ## Quick start
 
-Build everything from source:
+Clone the repository and run the installer with no flags. That opens the six-page terminal menu — the normal way to install:
+
+```sh
+git clone https://github.com/808x/VMM.git
+cd VMM
+./install.sh
+```
+
+On each page, `A`–`X` select options and `1`–`6` jump between QEMU, OVMF, virt-manager, HOST, AFTER and REVIEW. `Ctrl+C` quits at any time. On REVIEW, press **Enter** to build; the page shows the exact command line it will run.
+
+Then launch the desktop:
+
+```sh
+./prefix/launch.sh
+```
+
+For unattended installs you can skip the menu by giving every component flag:
 
 ```sh
 ./install.sh --qemu:bin=compile --qemu:patch=gtkegl,spicevirgl,vmvga,flexresize \
@@ -54,13 +70,7 @@ Build everything from source:
              --tool=libvirt-access,write-xml,verify,desktop-item
 ```
 
-Then launch the desktop:
-
-```sh
-./prefix/launch.sh
-```
-
-With no component flags, `./install.sh` opens the terminal menu. Resolve everything without changing anything:
+Resolve everything without changing anything:
 
 ```sh
 ./install.sh --dry-run --qemu:bin=compile --virtmgr:bin=compile --ovmf:bin=compile
