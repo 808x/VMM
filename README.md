@@ -2,9 +2,6 @@
 <h1 align="center">VMM</h1>
 <p align="center">A portable Virtual Machine Manager with hand-curated patches for usability (PCI/USB hotplug menus), 3D (VMware SVGA/DXVK on Windows, <code>virtio-vga-gl</code>/venus on CachyOS, SPICE + GTK together) and appearance (silent OVMF boot, a seamless X11/XWayland-reparented console).</p>
 
-<p align="center"><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows guest embedded in the VMM console, with Task Manager showing dynamic memory"></p>
-<p align="center"><sub>Windows on vmvga + DXVK; Task Manager shows 8.2 / 13.5 GB — the 60% boot allocation from the dynamic profile. The desktop also shows <a href="https://github.com/808x/portable-apps">808x/portable-apps</a>: self-contained app packages and the sandbox context menu.</sub></p>
-
 ---
 
 ## Screens
@@ -18,11 +15,13 @@
     <td><img src="assets/screenshots/menu_pcie.png" width="100%" alt="PCIe hotplug submenu"><br><b>PCIe hotplug</b>: a curated submenu that hides boot displays and mounted filesystems; here only the RTX A2000 is pre-selected.</td>
     <td><img src="assets/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection.</td>
   </tr>
-  <tr>
-    <td><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b>: virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</td>
-    <td><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows desktop and Task Manager"><br><b>Windows 11</b>: VMware SVGA 3D with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. Portabilized app collection from <a href="https://github.com/808x/portable-apps">808x/portable-apps</a> in context menu.</td>
-  </tr>
 </table>
+
+<p align="center"><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"></p>
+<p align="center"><sub><b>CachyOS</b> — virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</sub></p>
+
+<p align="center"><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows 11 desktop and Task Manager"></p>
+<p align="center"><sub><b>Windows 11</b> — VMware SVGA 3D with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. Portabilized app collection from <a href="https://github.com/808x/portable-apps">808x/portable-apps</a> in context menu.</sub></p>
 
 ---
 
