@@ -398,6 +398,7 @@ render_one() {
             UUID) val=${UUID:-} ;;
             NAME) val=${NAME:-} ;;
             DISK) val=${DISK:-} ;;
+            MAC) val=${MAC:-} ;;
             NETWORK) val=${NETWORK:-default} ;;
             NETWORK_TYPE) val=${NETWORK_TYPE:-network} ;;
             NETWORK_ATTR) if [ "${NETWORK_TYPE:-network}" = bridge ]; then
@@ -406,7 +407,8 @@ render_one() {
             *) if [ -n "${!tok+x}" ]; then val=${!tok}; else continue; fi ;;
         esac
         if [ -z "$val" ]; then
-            [ "$tok" = DISK ] || warn "$fn: @$tok@ is empty and has no filler; left in place"
+            [ "$tok" = DISK ] || [ "$tok" = MAC ] ||
+                warn "$fn: @$tok@ is empty and has no filler; left in place"
         else
             VALS[$tok]=$val
         fi
@@ -427,6 +429,9 @@ render_one() {
         esac
         [ "${skip_disk:-0}" = 1 ] && continue
         [ "${skip_nic:-0}" = 1 ] && continue
+        case "$line" in
+            *'@MAC@'*) [ -z "${MAC:-}" ] && continue ;;
+        esac
         for tok in "${!VALS[@]}"; do
             line=${line//@$tok@/${VALS[$tok]}}
         done
