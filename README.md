@@ -8,12 +8,12 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/screenshots/tui.png" width="100%" alt="Installer TUI on the HOST page"><br><b>Installer TUI</b>: six pages (QEMU, OVMF, virt-manager, HOST, AFTER, REVIEW). Missing build dependencies show a persistent error; sudo-gated rows ask once through sudo's own prompt. Runs in a PTY or a bare Linux TTY (e.g. <code>Ctrl+Alt+F3</code>) — raw-key input and ANSI colours, no curses.</td>
+    <td width="50%"><img src="assets/screenshots/tui.png" width="100%" alt="Installer TUI on the HOST page"><br><b>Installer TUI</b>: six pages (QEMU, OVMF, virt-manager, HOST, AFTER, REVIEW). Missing build dependencies show a persistent error; sudo-gated rows ask once through sudo's own prompt. Runs in a PTY or a bare Linux TTY (e.g. <code>Ctrl+Alt+F3</code>).</td>
     <td width="50%"><img src="assets/screenshots/dynamic_profile.png" width="100%" alt="profile.conf with dynamic memory and vCPU formulas"><br><b>Dynamic profile</b>: memory ceiling, boot allocation, vCPU count and venus hostmem are computed from the host. Blank fields are filled back from the live domain on sync.</td>
   </tr>
   <tr>
     <td><img src="assets/screenshots/menu_pcie.png" width="100%" alt="PCIe hotplug submenu"><br><b>PCIe hotplug</b>: a curated submenu that hides boot displays and mounted filesystems; here only the RTX A2000 is pre-selected.</td>
-    <td><img src="assets/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection.</td>
+    <td><img src="assets/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection for live attachment to the guest.</td>
   </tr>
   <tr>
     <td colspan="2"><b>Note on the menu bar</b>: the top bar is the Debian host's XFCE global-menu applet showing virt-manager's menus (File, Virtual Machine, View, Send Key). The window is maximized with its titlebar hidden by XFCE</td>
