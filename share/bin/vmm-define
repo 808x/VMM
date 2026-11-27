@@ -180,6 +180,7 @@ xml_get() {
     case "$key" in
         NAME)       sed -n "s|.*<name>\([^<]*\)</name>.*|\1|p" "$file" | head -1 ;;
         UUID)       sed -n "s|.*<uuid>\([^<]*\)</uuid>.*|\1|p" "$file" | head -1 ;;
+        VCPUS)      sed -n "s|.*<vcpu[^>]*>\([^<]*\)</vcpu>.*|\1|p" "$file" | head -1 ;;
         MAXIMUMMEM) sed -n "s|.*<memory[^>]*>\([^<]*\)</memory>.*|\1|p" "$file" | head -1 ;;
         CURRENTMEM) sed -n "s|.*<currentMemory[^>]*>\([^<]*\)</currentMemory>.*|\1|p" "$file" | head -1 ;;
         EMULATOR)   sed -n "s|.*<emulator>\([^<]*\)</emulator>.*|\1|p" "$file" | head -1 ;;
@@ -244,7 +245,7 @@ sync_one() {
         pairs+=("$p")
     }
 
-    for key in NAME MAXIMUMMEM CURRENTMEM EMULATOR OVMF_CODE OVMF_VARS \
+    for key in NAME MAXIMUMMEM CURRENTMEM VCPUS EMULATOR OVMF_CODE OVMF_VARS \
                OVMF_NVRAM NETWORK_TYPE NETWORK MAC DISK; do
         [ "${PSTATE[$fn.$key]:-}" = active ] || continue
         cur=${!key:-}
@@ -253,6 +254,8 @@ sync_one() {
                 NAME)       add_pair "$key" "s|<name>[^<]*</name>|<name>$cur</name>|" ;;
                 MAXIMUMMEM) add_pair "$key" "s|<memory unit='KiB'>[^<]*</memory>|<memory unit='KiB'>$cur</memory>|" ;;
                 CURRENTMEM) add_pair "$key" "s|<currentMemory unit='KiB'>[^<]*</currentMemory>|<currentMemory unit='KiB'>$cur</currentMemory>|" ;;
+                VCPUS) add_pair "$key" "s|<vcpu placement='static'>[^<]*</vcpu>|<vcpu placement='static'>$cur</vcpu>|"
+                       add_pair "$key" "s| cores='[0-9]*'| cores='$cur'|" ;;
                 EMULATOR)   add_pair "$key" "s|<emulator>[^<]*</emulator>|<emulator>$cur</emulator>|" ;;
                 OVMF_CODE)  add_pair "$key" "s|<loader[^>]*>[^<]*</loader>|<loader readonly='yes' secure='yes' type='pflash' format='raw'>$cur</loader>|" ;;
                 OVMF_VARS)  add_pair "$key" "s|template='[^']*' |template='$cur' |" ;;

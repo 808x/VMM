@@ -45,6 +45,9 @@ vm_cachyos() {
     NETWORK_TYPE="$NETWORK_TYPE_DEFAULT"
     MAC=""
     #DISK="/path/to/CachyOS.qcow2"
+    VCPUS="$VCPUS_SHARED"
+    HOSTMEM="${VENUS_MEM}K"
+    MAX_HOSTMEM="${VENUS_MEM}K"
     CURRENTMEM="$CURRENTMEM_VM1"
     MAXIMUMMEM="$MAXIMUM_MEM"
 }
@@ -61,29 +64,28 @@ vm_windows() {
     NETWORK_TYPE="$NETWORK_TYPE_DEFAULT"
     MAC=""
     #DISK="/path/to/Windows 11.qcow2"
+    VCPUS="$VCPUS_SHARED"
     CURRENTMEM="$CURRENTMEM_VM2"
     MAXIMUMMEM="$MAXIMUM_MEM"
 }
 
 # [memory]
 # All values in KiB (free -k, not free -m).  The result tracks the host: a
-# 31 GiB machine gets ~13.5 GiB max, a 16 GiB machine ~6 GiB, with a 4 GiB floor.
+# 31 GiB machine gets ~13.5 GiB max, an 8 GiB machine ~4 GiB, with a floor
+# of a quarter of the host (capped at 4 GiB).
 GIB=1048576
 MEM_SLACK=1000
 HOST_RESERVE=$(( (GIB + MEM_SLACK) * 2 ))
 VENUS_RESERVE=$(( 2 * GIB ))
 CURRENT_RATIO=60   # boot allocation as a percentage of the ceiling
-FLOOR=$(( 4 * GIB ))
 TOTAL_MEM=$(free -k | awk '/^Mem:/ {print $2}')
+FLOOR=$(( TOTAL_MEM / 4 ))
+[ "$FLOOR" -gt $(( 4 * GIB )) ] && FLOOR=$(( 4 * GIB ))
 
-# Dynamic ceiling: leave the host reserve plus venus hostmem, then split the
-# remainder between the two guests.  Deliberately not a round constant.
+# Keep two guests within half the host minus reserves; deliberately not round.
 GUEST_CAP=$(( (TOTAL_MEM - HOST_RESERVE - VENUS_RESERVE) / 2 ))
 [ "$GUEST_CAP" -lt "$FLOOR" ] && GUEST_CAP=$FLOOR
 
-# Maximum is the balloon ceiling; current is what the guest boots with:
-# 60% of maximum by default, floored at 4 GiB, leaving dramatic headroom to
-# grow without a reboot (virtio balloon is present).
 MAXIMUM_MEM=$(( TOTAL_MEM/2 - GIB ))
 [ "$MAXIMUM_MEM" -gt "$GUEST_CAP" ] && MAXIMUM_MEM=$GUEST_CAP
 [ "$MAXIMUM_MEM" -lt "$FLOOR" ] && MAXIMUM_MEM=$FLOOR
@@ -92,4 +94,13 @@ CURRENTMEM_VM1=$(( MAXIMUM_MEM * CURRENT_RATIO / 100 ))
 [ "$CURRENTMEM_VM1" -lt "$FLOOR" ] && CURRENTMEM_VM1=$FLOOR
 CURRENTMEM_VM2=$(( MAXIMUM_MEM * CURRENT_RATIO / 100 ))
 [ "$CURRENTMEM_VM2" -lt "$FLOOR" ] && CURRENTMEM_VM2=$FLOOR
+
+# Half the host CPUs, capped at 8 and floored at 2.  Venus hostmem follows
+# host RAM: 1/16 of it, 512 MiB floor, 2 GiB ceiling.
+VCPUS_SHARED=$(( $(nproc) / 2 ))
+[ "$VCPUS_SHARED" -gt 8 ] && VCPUS_SHARED=8
+[ "$VCPUS_SHARED" -lt 2 ] && VCPUS_SHARED=2
+VENUS_MEM=$(( TOTAL_MEM / 16 ))
+[ "$VENUS_MEM" -lt $(( 512 * 1024 )) ] && VENUS_MEM=$(( 512 * 1024 ))
+[ "$VENUS_MEM" -gt $(( 2 * GIB )) ] && VENUS_MEM=$(( 2 * GIB ))
 true
