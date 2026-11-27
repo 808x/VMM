@@ -215,7 +215,7 @@
 +                        <property name="visible">True</property>
 +                        <property name="can-focus">False</property>
 +                        <property name="tooltip-text" translatable="yes">Attach or detach a passed-through PCI device. Live while the VM is running, saved configuration while it is stopped.</property>
-+                        <property name="label" translatable="yes">_Redirect PCI device</property>
++                        <property name="label" translatable="yes">Redirect PCI _device</property>
 +                        <property name="use-underline">True</property>
 +                      </object>
 +                    </child>

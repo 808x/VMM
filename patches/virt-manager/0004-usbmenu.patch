@@ -188,5 +188,6 @@
                          <property name="can-focus">False</property>
 +                        <property name="sensitive">False</property>
                          <property name="tooltip-text" translatable="yes">Redirect host USB device to virtual machine with SPICE graphics.</property>
-                         <property name="label" translatable="yes">_Redirect USB device</property>
+-                        <property name="label" translatable="yes">_Redirect USB device</property>
++                        <property name="label" translatable="yes">Redirect _USB device</property>
                          <property name="use-underline">True</property>
