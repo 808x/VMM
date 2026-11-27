@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/logo.svg" width="140" alt="VMM logo"></p>
 <h1 align="center">VMM</h1>
-<p align="center">A portable, self-contained virt-manager desktop with a patched QEMU display stack — one VM for CachyOS with <code>virtio-vga-gl</code>/venus, one for Windows with <code>vmvga</code> and DXVK.</p>
+<p align="center">A portable Virtual Machine Manager with hand-curated patches for usability (PCI/USB hotplug menus), 3D (VMware SVGA/DXVK on Windows, <code>virtio-vga-gl</code>/venus on CachyOS, SPICE + GTK together) and appearance (silent OVMF boot, a seamless X11/XWayland-reparented console).</p>
 
 <p align="center"><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows guest embedded in the VMM console, with Task Manager showing dynamic memory"></p>
 <p align="center"><sub>Windows on vmvga + DXVK; Task Manager shows 8.2 / 13.5 GB — the 60% boot allocation from the dynamic profile. The desktop also shows <a href="https://github.com/808x/portable-apps">808x/portable-apps</a>: self-contained app packages and the sandbox context menu.</sub></p>
