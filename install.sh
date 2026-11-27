@@ -941,7 +941,7 @@ menu_keys() {
     if [ "$key" != review ]; then
         if [ "$key" = host ] && menu_build_blocked; then range=A; fi
         printf '%s[%s]%s%s%s' "$c_bold$c_info" "$range" "$c_reset" \
-            "$c_muted" ' Select option'
+            "$c_text" ' Select option'
         printf '    '
     fi
     if [ "$menu_mode" = link ]; then
@@ -1706,6 +1706,8 @@ install_launchers() {
     ensure_front_links
     install -m 0755 "$DIR/share/bin/vmm-qemu" "$prefix/bin/vmm-qemu"
     install -m 0755 "$DIR/share/bin/vmm-define" "$prefix/bin/vmm-define"
+    mkdir -p "$prefix/share/icons"
+    install -m 0644 "$DIR/share/icons/vmm.png" "$prefix/share/icons/vmm.png"
     build_embed_shim
     if [ "$vm_bin" = link ]; then
         note "linking virt-manager from $vm_link"

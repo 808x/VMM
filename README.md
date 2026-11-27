@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="140" alt="VMM logo"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/808x/assets/main/logo.svg" width="140" alt="VMM logo"></p>
 <h1 align="center">VMM</h1>
 <p align="center">A portable Virtual Machine Manager with hand-curated patches for usability (PCI/USB hotplug menus), 3D (VMware SVGA/DXVK on Windows, <code>virtio-vga-gl</code>/venus on CachyOS, SPICE + GTK together) and appearance (silent OVMF boot, a seamless X11/XWayland-reparented console).</p>
 
@@ -8,21 +8,21 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/screenshots/tui.png" width="100%" alt="Installer TUI on the HOST page"><br><b>Installer TUI</b>: six pages (QEMU, OVMF, virt-manager, HOST, AFTER, REVIEW). Missing build dependencies show a persistent error; sudo-gated rows ask once through sudo's own prompt. Runs in a PTY or a bare Linux TTY (e.g. <code>Ctrl+Alt+F3</code>).</td>
-    <td width="50%"><img src="assets/screenshots/dynamic_profile.png" width="100%" alt="profile.conf with dynamic memory and vCPU formulas"><br><b>Dynamic profile</b>: memory ceiling, boot allocation, vCPU count and venus hostmem are computed from the host. Blank fields are filled back from the live domain on sync.</td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/808x/assets/main/screenshots/tui.png" width="100%" alt="Installer TUI on the HOST page"><br><b>Installer TUI</b>: six pages (QEMU, OVMF, virt-manager, HOST, AFTER, REVIEW). Missing build dependencies show a persistent error; sudo-gated rows ask once through sudo's own prompt. Runs in a PTY or a bare Linux TTY (e.g. <code>Ctrl+Alt+F3</code>).</td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/808x/assets/main/screenshots/dynamic_profile.png" width="100%" alt="profile.conf with dynamic memory and vCPU formulas"><br><b>Dynamic profile</b>: memory ceiling, boot allocation, vCPU count and venus hostmem are computed from the host. Blank fields are filled back from the live domain on sync.</td>
   </tr>
   <tr>
-    <td><img src="assets/screenshots/menu_pcie.png" width="100%" alt="PCIe hotplug submenu"><br><b>PCIe hotplug</b>: a curated submenu that hides boot displays and mounted filesystems; here only the RTX A2000 is pre-selected.</td>
-    <td><img src="assets/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection for live attachment to the guest.</td>
+    <td><img src="https://raw.githubusercontent.com/808x/assets/main/screenshots/menu_pcie.png" width="100%" alt="PCIe hotplug submenu"><br><b>PCIe hotplug</b>: a curated submenu that hides boot displays and mounted filesystems; here only the RTX A2000 is pre-selected.</td>
+    <td><img src="https://raw.githubusercontent.com/808x/assets/main/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection for live attachment to the guest.</td>
   </tr>
   <tr>
     <td colspan="2"><em><b>Note:</b> the top bar is the Debian host's XFCE global-menu applet showing virt-manager's menus (File, Virtual Machine, View, Send Key). The window is maximized with its titlebar hidden by XFCE</em></td>
   </tr>
   <tr>
-    <td colspan="2"><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b> — virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</td>
+    <td colspan="2"><img src="https://raw.githubusercontent.com/808x/assets/main/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b> — virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</td>
   </tr>
   <tr>
-    <td colspan="2"><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows 11 desktop and Task Manager"><br><b>Windows 11</b> — VMware SVGA 3D with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. Portabilized app collection from <a href="https://github.com/808x/portable-apps">808x/portable-apps</a> in context menu.</td>
+    <td colspan="2"><img src="https://raw.githubusercontent.com/808x/assets/main/screenshots/vm_windows.png" width="100%" alt="Windows 11 desktop and Task Manager"><br><b>Windows 11</b> — VMware SVGA 3D with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. Portabilized app collection from <a href="https://github.com/808x/portable-apps">808x/portable-apps</a> in context menu.</td>
   </tr>
 </table>
 
