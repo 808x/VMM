@@ -16,7 +16,7 @@
     <td><img src="assets/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection for live attachment to the guest.</td>
   </tr>
   <tr>
-    <td colspan="2"><b>Note on the menu bar</b>: the top bar is the Debian host's XFCE global-menu applet showing virt-manager's menus (File, Virtual Machine, View, Send Key). The window is maximized with its titlebar hidden by XFCE</td>
+    <td colspan="2"><em>Note: the top bar is the Debian host's XFCE global-menu applet showing virt-manager's menus (File, Virtual Machine, View, Send Key). The window is maximized with its titlebar hidden by XFCE</em></td>
   </tr>
   <tr>
     <td colspan="2"><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b> — virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</td>
