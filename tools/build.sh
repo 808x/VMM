@@ -68,8 +68,6 @@ OVMF_VARS_PATHS=(
 
 # ---------------------------------------------------------------- metadata
 
-# Print the first value of KEY from the leading comment block of FILE.
-
 # Print every value of KEY from the leading comment block of FILE.
 patch_list_field() {
     local file="$1" key="$2" line val
@@ -116,7 +114,7 @@ unit_bool() {
 unit_scan_page() {
     local kind="$1" page="$2" root="$3"
     local dir="$root/$page" f flag name desc hpage deps tick post sudo rel
-    local -A seen=() emitted=() emitted=()
+    local -A seen=()
     [ -n "$page" ] || die "unit_scan_page: empty page"
     [ -d "$dir" ] || return 0
     while IFS= read -r f; do
@@ -342,7 +340,6 @@ patch_apply() {
     local eng="${1:-}" tree="${2:-}"; shift 2 || true
     local -a flags=()
     local g rel file skey src
-    local line
     while IFS= read -r g; do
         [ -n "$g" ] && flags+=("$g")
     done < <(patch_resolve "$eng" "$@")
