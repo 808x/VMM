@@ -131,3 +131,101 @@ Paths and flags come from the environment (VMM_SRC, VMM_BUILD, VMM_PREFIX,
 VMM_JOBS, VMM_CFLAGS, VMM_CXXFLAGS) plus the upstreams.conf locks.
 EOF
 }
+
+# ---------------------------------------------------------------------------
+# Rolling build-log window.  One writer (the renderer) owns the TTY; the
+# build subprocess writes only to its log file.  Non-TTY terminals get plain
+# output, and VMM_LOGWIN=0 forces that fallback explicitly.
+#   vmm_logwin_stream LOG LABEL VALUE PID
+VMM_LOGWIN_N=${VMM_LOGWIN_N:-20}
+VMM_LOGWIN_DELAY=${VMM_LOGWIN_DELAY:-1}
+
+vmm_logwin_ok() {
+    [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && [ "${VMM_LOGWIN:-1}" != 0 ]
+}
+
+# Strip CR, expand tabs, strip embedded ANSI, then truncate by byte count.
+vmm_logwin_clean() {
+    local s="$1" max="$2"
+    s=${s//$'\r'/}
+    s=${s//$'\t'/ }
+    s=$(printf '%s' "$s" | LC_ALL=C sed $'s/\033\[[0-9;?]*[A-Za-z]//g')
+    printf '%s' "${s:0:max}"
+}
+
+vmm_logwin_stream() (
+    local log="$1" label="$2" value="$3" pid="$4"
+    local n="$VMM_LOGWIN_N" delay="$VMM_LOGWIN_DELAY" spinner=('|' '/' '-' '\')
+    local cyan=$'\033[1;36m' amber=$'\033[1;33m' green=$'\033[1;32m'
+    local reset=$'\033[0m' up erase hide show
+    local rows cols width window tick=0 drawn=0 total start end final alive
+    local val_max range_max frame file chunk line done_flag=0
+
+    if ! vmm_logwin_ok; then
+        while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+        cat "$log"
+        return 0
+    fi
+
+    cleanup() {
+        [ "$done_flag" = 1 ] && return 0
+        done_flag=1
+        printf '%s\n' "$reset"
+        printf '\033[?25h'
+    }
+    trap cleanup EXIT
+    trap 'cleanup; exit 130' INT TERM
+
+    hide=$'\033[?25l'; show=$'\033[?25h'; erase=$'\033[2K'
+    printf '%s' "$hide"
+
+    while :; do
+        rows=$(tput lines 2>/dev/null || echo 24)
+        cols=$(tput cols 2>/dev/null || echo 80)
+        [ "$rows" -gt 6 ] || rows=24
+        [ "$cols" -gt 1 ] || cols=80
+        [ "$n" -lt $((rows - 6)) ] || n=$((rows - 6))
+        width=$((cols - 1))
+        window=$((n + 4))
+        up=$'\033['"$window"'A'
+
+        total=$(wc -l < "$log" 2>/dev/null || echo 0)
+        kill -0 "$pid" 2>/dev/null && alive=1 || alive=0
+        # Tail window: always the latest n lines, so a burst cannot build a
+        # backlog.  The log file itself remains the full archive.
+        start=$((total - n + 1)); [ "$start" -lt 1 ] && start=1
+        end=$total
+        [ "$alive" = 0 ] && final=1 || final=0
+
+        [ "$drawn" -gt 0 ] && printf '%s' "$up"
+
+        val_max=$((width - ${#label} - 9)); [ "$val_max" -lt 1 ] && val_max=1
+        value=$(vmm_logwin_clean "$value" "$val_max")
+        printf '\r%s%s%s%s %s (build)\n' \
+            "$erase" "$cyan" "$label" "$reset" "$value"
+
+        range_max=$((width - ${#start} - ${#end} - 22))
+        [ "$range_max" -lt 1 ] && range_max=1
+        file=$(vmm_logwin_clean "$log" "$range_max")
+        frame=${spinner[tick % 4]}
+        if [ "$final" = 1 ]; then
+            printf '\r%s   %s[+] lines %s-%s%s from %s\n' \
+                "$erase" "$green" "$start" "$end" "$reset" "$file"
+        else
+            printf '\r%s   %s[%s] lines %s-%s%s from %s\n' \
+                "$erase" "$amber" "$frame" "$start" "$end" "$reset" "$file"
+        fi
+        printf '\r%s\n' "$erase"
+
+        mapfile -t chunk < <(tail -n "$n" "$log" 2>/dev/null)
+        for ((j = 0; j < n; j++)); do
+            printf '\r%s%s\n' "$erase" "$(vmm_logwin_clean "${chunk[j]:-}" "$width")"
+        done
+        printf '\r%s\n' "$erase"
+
+        tick=$((tick + 1)); drawn=1
+        [ "$final" = 1 ] && break
+        sleep "$delay"
+    done
+    cleanup
+)

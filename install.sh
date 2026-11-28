@@ -638,8 +638,10 @@ if [ "$dry_run" = 1 ]; then
     note "prefix: $prefix"
     note "locks: virt-manager $vm_lock, qemu $qemu_lock, vmvga ${vmvga_lock%????????????????????????}, virgl ${virgl_lock%????????????????????????}, dxvk $dxvk_lock"
 fi
-[ -n "$enable_vm" ] && note "virt-manager groups: $enable_vm"
-[ -n "$enable_qemu" ] && note "qemu groups: $enable_qemu ($qemu_mode)"
+if [ "$dry_run" = 1 ]; then
+    [ -n "$enable_vm" ] && note "virt-manager groups: $enable_vm"
+    [ -n "$enable_qemu" ] && note "qemu groups: $enable_qemu ($qemu_mode)"
+fi
 [ "$install_deps" = 1 ] && note "dependencies: requested"
 
 component_given=0
@@ -1645,8 +1647,15 @@ build_component() {
     env -i PATH="$PATH" HOME="${HOME:-/root}" \
         VMM_ROOT="$DIR" VMM_SRC="$SRC" VMM_BUILD="$BUILD" \
         VMM_PREFIX="$prefix" VMM_JOBS="$jobs" \
-        "$DIR/tools/build.sh" build "$eng" --patch="$groups" >"$log" 2>&1 || rc=$?
-    cat "$log"
+        "$DIR/tools/build.sh" build "$eng" --patch="$groups" >"$log" 2>&1 &
+    pid=$!
+    case "$eng" in
+        qemu)         lw_label="-- qemu groups:";   lw_value="$qemu_groups" ;;
+        virt-manager) lw_label="-- virtmgr groups:"; lw_value="$vm_groups" ;;
+        ovmf)         lw_label="-- ovmf patches:";   lw_value="$ovmf_groups" ;;
+    esac
+    vmm_logwin_stream "$log" "$lw_label" "$lw_value" "$pid"
+    wait "$pid" || rc=$?
     [ "${rc:-0}" = 0 ] || die "$label build failed"
     [ "$eng" = qemu ] && note "qemu profile at $prefix/qemu"
 }
