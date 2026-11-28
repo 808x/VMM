@@ -1643,18 +1643,24 @@ build_component() {
     esac
     build_env
     log="$BUILD/logs/$eng-build.log"
+    status="$BUILD/logs/$eng-build.status"
     mkdir -p "${log%/*}"
-    env -i PATH="$PATH" HOME="${HOME:-/root}" \
-        VMM_ROOT="$DIR" VMM_SRC="$SRC" VMM_BUILD="$BUILD" \
-        VMM_PREFIX="$prefix" VMM_JOBS="$jobs" \
-        "$DIR/tools/build.sh" build "$eng" --patch="$groups" >"$log" 2>&1 &
+    (
+        env -i PATH="$PATH" HOME="${HOME:-/root}" \
+            VMM_ROOT="$DIR" VMM_SRC="$SRC" VMM_BUILD="$BUILD" \
+            VMM_PREFIX="$prefix" VMM_JOBS="$jobs" \
+            "$DIR/tools/build.sh" build "$eng" --patch="$groups" >"$log" 2>&1
+        rc=$?
+        printf '%s\n' "$rc" > "$status"
+        exit "$rc"
+    ) &
     pid=$!
     case "$eng" in
         qemu)         lw_label="-- qemu groups:";   lw_value="$qemu_groups" ;;
         virt-manager) lw_label="-- virtmgr groups:"; lw_value="$vm_groups" ;;
         ovmf)         lw_label="-- ovmf patches:";   lw_value="$ovmf_groups" ;;
     esac
-    vmm_logwin_stream "$log" "$lw_label" "$lw_value" "$pid"
+    vmm_logwin_stream "$log" "$lw_label" "$lw_value" "$pid" "$status"
     wait "$pid" || rc=$?
     [ "${rc:-0}" = 0 ] || die "$label build failed"
     [ "$eng" = qemu ] && note "qemu profile at $prefix/qemu"

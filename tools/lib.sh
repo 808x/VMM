@@ -154,11 +154,11 @@ vmm_logwin_clean() {
 }
 
 vmm_logwin_stream() (
-    local log="$1" label="$2" value="$3" pid="$4"
+    local log="$1" label="$2" value="$3" pid="$4" status="${5:-}"
     local n="$VMM_LOGWIN_N" delay="$VMM_LOGWIN_DELAY" spinner=('|' '/' '-' '\')
-    local cyan=$'\033[1;36m' amber=$'\033[1;33m' green=$'\033[1;32m'
+    local cyan=$'\033[1;36m' amber=$'\033[1;33m' green=$'\033[1;32m' red=$'\033[1;31m'
     local reset=$'\033[0m' up erase hide show
-    local rows cols width window tick=0 drawn=0 total start end final alive
+    local rows cols width window tick=0 drawn=0 total start end final alive failed rc
     local val_max range_max frame file chunk line done_flag=0
 
     if ! vmm_logwin_ok; then
@@ -182,11 +182,11 @@ vmm_logwin_stream() (
     while :; do
         rows=$(tput lines 2>/dev/null || echo 24)
         cols=$(tput cols 2>/dev/null || echo 80)
-        [ "$rows" -gt 6 ] || rows=24
+        [ "$rows" -gt 5 ] || rows=24
         [ "$cols" -gt 1 ] || cols=80
-        [ "$n" -lt $((rows - 6)) ] || n=$((rows - 6))
+        [ "$n" -lt $((rows - 5)) ] || n=$((rows - 5))
         width=$((cols - 1))
-        window=$((n + 4))
+        window=$((n + 3))
         up=$'\033['"$window"'A'
 
         total=$(wc -l < "$log" 2>/dev/null || echo 0)
@@ -196,6 +196,16 @@ vmm_logwin_stream() (
         start=$((total - n + 1)); [ "$start" -lt 1 ] && start=1
         end=$total
         [ "$alive" = 0 ] && final=1 || final=0
+        failed=0
+        if [ "$final" = 1 ]; then
+            rc=""
+            [ -n "$status" ] && [ -f "$status" ] && rc=$(cat "$status" 2>/dev/null || true)
+            if [ -n "$rc" ] && [ "$rc" != 0 ]; then
+                failed=1
+            elif [ -z "$rc" ] && grep -q '^ERROR:' "$log" 2>/dev/null; then
+                failed=1
+            fi
+        fi
 
         [ "$drawn" -gt 0 ] && printf '%s' "$up"
 
@@ -209,8 +219,13 @@ vmm_logwin_stream() (
         file=$(vmm_logwin_clean "$log" "$range_max")
         frame=${spinner[tick % 4]}
         if [ "$final" = 1 ]; then
-            printf '\r%s   %s[+] lines %s-%s%s from %s\n' \
-                "$erase" "$green" "$start" "$end" "$reset" "$file"
+            if [ "$failed" = 1 ]; then
+                printf '\r%s   %s[x] lines %s-%s%s from %s\n' \
+                    "$erase" "$red" "$start" "$end" "$reset" "$file"
+            else
+                printf '\r%s   %s[+] lines %s-%s%s from %s\n' \
+                    "$erase" "$green" "$start" "$end" "$reset" "$file"
+            fi
         else
             printf '\r%s   %s[%s] lines %s-%s%s from %s\n' \
                 "$erase" "$amber" "$frame" "$start" "$end" "$reset" "$file"
@@ -221,7 +236,6 @@ vmm_logwin_stream() (
         for ((j = 0; j < n; j++)); do
             printf '\r%s%s\n' "$erase" "$(vmm_logwin_clean "${chunk[j]:-}" "$width")"
         done
-        printf '\r%s\n' "$erase"
 
         tick=$((tick + 1)); drawn=1
         [ "$final" = 1 ] && break
