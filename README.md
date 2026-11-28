@@ -68,6 +68,8 @@ Then launch the desktop:
 ./prefix/launch.sh
 ```
 
+Re-running the same install skips any component whose built artifacts and patch/lock stamp are unchanged. Set `VMM_FORCE_BUILD=1` to force a rebuild.
+
 For unattended installs you can skip the menu by giving every component flag:
 
 ```sh

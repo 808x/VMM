@@ -746,13 +746,45 @@ do_ovmf() {
 }
 
 build_engine() {
-    local eng="${1:-}" patches="${2:-}"
+    local eng="${1:-}" patches="${2:-}" stamp wanted g rel lock
+    : "${VMM_PREFIX:?VMM_PREFIX is not set}"
+    stamp="$VMM_PREFIX/.vmm-build-$eng"
+
+    # Identity of this build: engine, requested flags, patch contents and the
+    # upstream lock.  No prefix path, so a moved prefix keeps its stamp.
+    case "$eng" in
+        qemu|ovmf) lock=$(conf_get qemu lock) ;;
+        virt-manager) lock=$(conf_get virt-manager lock) ;;
+        *) lock="" ;;
+    esac
+    wanted=$(printf '%s\n%s\n%s\n' "$eng" "$patches" "$lock")
+    for g in $(patch_resolve "$eng" "$patches"); do
+        rel=$(patch_rel "$eng" "$g")
+        [ -f "$ROOT/$rel" ] && wanted="$wanted $(md5sum "$ROOT/$rel" | cut -d' ' -f1)"
+    done
+    wanted=$(printf '%s' "$wanted" | md5sum | cut -d' ' -f1)
+
+    if [ "${VMM_FORCE_BUILD:-0}" != 1 ] && [ -f "$stamp" ] &&
+       [ "$(cat "$stamp" 2>/dev/null)" = "$wanted" ]; then
+        if { case "$eng" in
+                qemu) [ -x "$VMM_PREFIX/bin/qemu-system-x86_64" ] ;;
+                virt-manager) [ -x "$VMM_PREFIX/bin/virt-manager" ] &&
+                    [ -f "$VMM_PREFIX/share/virt-manager/virtManager/virtmanager.py" ] ;;
+                ovmf) [ -f "$VMM_PREFIX/firmware/OVMF/OVMF_CODE_4M.fd" ] &&
+                    [ -f "$VMM_PREFIX/firmware/OVMF/OVMF_VARS_4M.fd" ] ;;
+             esac; }; then
+            note "$eng already built; skipping"
+            return 0
+        fi
+    fi
+
     case "$eng" in
         qemu)         do_qemu "$patches" ;;
         virt-manager) do_vm "$patches" ;;
         ovmf)         do_ovmf "$patches" ;;
         *) die "unknown engine '$eng'" ;;
     esac
+    printf '%s\n' "$wanted" > "$stamp"
 }
 
 
