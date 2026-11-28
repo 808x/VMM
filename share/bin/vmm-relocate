@@ -1,9 +1,11 @@
 #!/bin/bash
 # Rewrite build-time prefix paths after a manual move.  Idempotent.
-# Usage: vmm-relocate [OLD_PREFIX]   (default: detected from build.cfg/wrappers)
+# Usage: vmm-relocate [NEW_PREFIX] [OLD_PREFIX]
+# install.sh passes NEW_PREFIX; manual runs default to the script's parent.
+# OLD_PREFIX is detected from build.cfg/wrappers when omitted.
 set -u
-NEW="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OLD="${1:-}"
+NEW="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+OLD="${2:-}"
 if [ -z "$OLD" ]; then
     cfg="$NEW/share/virt-manager/virtinst/build.cfg"
     [ -f "$cfg" ] && OLD=$(sed -n 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*//p' "$cfg" | head -1)

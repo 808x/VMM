@@ -5,7 +5,7 @@
 # VMM_VAR: install_deps
 # VMM_PHASE: early
 # VMM_ARGS: --install build,runtime
-# VMM_DESC: Compiler, meson/ninja and dev headers for the build; GTK3, libvirt, spice and Vulkan to run it.
+# VMM_DESC: Compiler, Meson/Ninja, dev headers for build; GTK3, libvirt, SPICE, Vulkan to run.
 # VMM_SUDO: yes
 # VMM_POST: no
 set -eu
