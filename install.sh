@@ -1724,6 +1724,7 @@ install_launchers() {
     ensure_front_links
     install -m 0755 "$DIR/share/bin/vmm-qemu" "$prefix/bin/vmm-qemu"
     install -m 0755 "$DIR/share/bin/vmm-vfio-ctl" "$prefix/libexec/vmm-vfio-ctl"
+    install -m 0755 "$DIR/share/bin/vmm-host-tools" "$prefix/bin/vmm-host-tools"
     install -m 0755 "$DIR/share/bin/vmm-define" "$prefix/bin/vmm-define"
     mkdir -p "$prefix/share/icons"
     install -m 0644 "$DIR/share/icons/vmm.png" "$prefix/share/icons/vmm.png"

@@ -70,6 +70,8 @@ Then launch the desktop:
 
 Re-running the same install skips any component whose built artifacts and patch/lock stamp are unchanged. Set `VMM_FORCE_BUILD=1` to force a rebuild.
 
+Host-global pieces (VFIO helper, sudoers, udev rule, AppArmor) are installed once per system. After moving the prefix, refresh them with `sudo <prefix>/bin/vmm-host-tools` — no source tree required. `launch.sh` itself never needs sudo.
+
 For unattended installs you can skip the menu by giving every component flag:
 
 ```sh

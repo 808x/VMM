@@ -1,0 +1,98 @@
+#!/bin/bash
+# Install/refresh host-global pieces needed by a VMM prefix.
+# Must run as root: sudo <prefix>/bin/vmm-host-tools
+# No source tree needed; the helper is read from <prefix>/libexec.
+set -eu
+
+if [ "$(id -u)" != 0 ]; then
+    echo "vmm-host-tools: run as root (sudo $0)" >&2
+    exit 1
+fi
+
+PREFIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+USER_NAME="${SUDO_USER:-${VMM_USER:-}}"
+[ -n "$USER_NAME" ] || USER_NAME="$(stat -c %U "$PREFIX" 2>/dev/null || echo root)"
+
+note() { printf -- '-- %s\n' "$*"; }
+
+note "configuring host for $PREFIX (owner $USER_NAME)"
+
+# 1. VFIO helper, sudoers rule and udev mode.
+helper="$PREFIX/libexec/vmm-vfio-ctl"
+if [ -f "$helper" ]; then
+    install -d /usr/local/sbin
+    install -m 0755 "$helper" /usr/local/sbin/vmm-vfio-ctl
+    cat > /etc/sudoers.d/vmm-vfio <<'EOF'
+# Installed by VMM host-tools. Grants device bind/unbind only.
+%libvirt ALL=(root) NOPASSWD: /usr/local/sbin/vmm-vfio-ctl
+EOF
+    chmod 0440 /etc/sudoers.d/vmm-vfio
+    cat > /etc/udev/rules.d/60-vmm-vfio.rules <<'EOF'
+SUBSYSTEM=="vfio", MODE="0666"
+EOF
+    udevadm control --reload-rules 2>/dev/null || true
+    note "vfio helper installed"
+else
+    note "no vfio helper in $PREFIX/libexec; skipped VFIO setup"
+fi
+
+# 2. Parent traversal and ownership.
+d="$PREFIX"
+while [ -n "$d" ] && [ "$d" != / ]; do
+    [ -d "$d" ] || break
+    [ "$(stat -c %A "$d" 2>/dev/null | cut -c10)" = x ] || chmod o+x "$d" 2>/dev/null || true
+    d=$(dirname "$d")
+done
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != root ] && id -u "$USER_NAME" >/dev/null 2>&1; then
+    uid=$(id -u "$USER_NAME"); gid=$(id -gn "$USER_NAME")
+    chown -R "$uid:$gid" "$PREFIX" 2>/dev/null || note "warning: cannot chown $PREFIX to $USER_NAME"
+fi
+
+# 3. Session libvirtd cannot raise RLIMIT_CORE from an unprivileged user.
+uc="/home/$USER_NAME/.config/libvirt/qemu.conf"
+if [ -f "$uc" ] && ! grep -qE '^[[:space:]]*max_core[[:space:]]*=' "$uc"; then
+    printf '\n# VMM: avoid setrlimit(RLIM_INFINITY) under a user session.\nmax_core = 0\n' >> "$uc"
+    note "set max_core = 0 in $uc"
+fi
+
+# 4. AppArmor rules for the current prefix path (drop stale VMM blocks).
+marker="# VMM prefix: $PREFIX"
+strip_old() {
+    awk -v marker="# VMM prefix:" '
+        index($0, marker) == 1 { skip = 1; next }
+        skip && /^  "/ { next }
+        skip && /^$/ { skip = 0 }
+        { print }
+    ' "$1" > "$1.vmm-new" && mv -f "$1.vmm-new" "$1"
+}
+qa=/etc/apparmor.d/local/abstractions/libvirt-qemu
+ld=/etc/apparmor.d/local/usr.sbin.libvirtd
+mkdir -p "$(dirname "$qa")" "$(dirname "$ld")"
+[ -f "$qa" ] && strip_old "$qa" || : > "$qa"
+[ -f "$ld" ] && strip_old "$ld" || : > "$ld"
+{
+    printf '%s\n' "$marker"
+    printf '  "%s/**" rwklix,\n' "$PREFIX"
+    printf '  /usr/bin/** rix,\n'
+    printf '  /usr/lib/** rix,\n'
+    if [ -f "$PREFIX/profile.conf" ]; then
+        awk -F'"' '/DISK=/ && $2 ~ /^\// { print $2 }' "$PREFIX/profile.conf" |
+        while IFS= read -r disk; do
+            [ -n "$disk" ] || continue
+            printf '  "%s" rwk,\n' "$disk"
+            printf '  "%s/*" rwk,\n' "$(dirname "$disk")"
+        done
+    fi
+} >> "$qa"
+printf '%s\n  "%s/**" rwklix,\n' "$marker" "$PREFIX" >> "$ld"
+note "AppArmor rules refreshed for $PREFIX"
+
+if command -v apparmor_parser >/dev/null 2>&1; then
+    for f in /etc/apparmor.d/usr.sbin.libvirtd /etc/apparmor.d/libvirt/libvirt-*; do
+        [ -f "$f" ] && apparmor_parser -r "$f" >/dev/null 2>&1 || true
+    done
+fi
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload libvirtd >/dev/null 2>&1 || true
+fi
+note "host setup complete"
