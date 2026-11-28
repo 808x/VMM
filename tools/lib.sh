@@ -249,73 +249,80 @@ vmm_logwin_stream() (
 # text files and preserves regular-file modes.
 #   vmm_extract_tar ARCHIVE DEST [STRIP_COMPONENTS]
 vmm_extract_tar() {
-    local tb="$1" dest="$2" strip="${3:-0}" err
-    err="$(mktemp "${TMPDIR:-/tmp}/vmm-tar.XXXXXX")" || return 1
-    if [ "${VMM_FORCE_TAR_FALLBACK:-0}" != 1 ] &&
-       tar -xf "$tb" -C "$dest" --strip-components="$strip" 2>"$err"; then
-        rm -f "$err"
-        return 0
+    local tb="$1" dest="$2" strip="${3:-0}" err trc
+    local probe="$dest/.vmm-symlink-probe.$$" symlinks_ok=1
+    if ln -s vmm-target "$probe" 2>/dev/null; then
+        rm -f "$probe"
+    else
+        symlinks_ok=0
+        rm -f "$probe" 2>/dev/null || true
     fi
-    if [ "${VMM_FORCE_TAR_FALLBACK:-0}" != 1 ] &&
-       ! grep -qiE 'symlink|operation not supported|not supported' "$err"; then
-        cat "$err" >&2
-        rm -f "$err"
-        return 1
+    err="$(mktemp "${TMPDIR:-/tmp}/vmm-tar.XXXXXX")" || return 1
+    if [ "$symlinks_ok" = 1 ] && [ "${VMM_FORCE_TAR_FALLBACK:-0}" != 1 ]; then
+        if tar -xf "$tb" -C "$dest" --strip-components="$strip" 2>"$err"; then
+            rm -f "$err"
+            return 0
+        fi
+        if ! grep -qiE 'symlink|operation not supported|not supported' "$err"; then
+            cat "$err" >&2
+            rm -f "$err"
+            return 1
+        fi
     fi
     rm -f "$err"
     printf -- '-- tar: symlinks unsupported; extracting with plain-file fallback\n' >&2
-    python3 - "$tb" "$dest" "$strip" <<'PYFALLBACK'
+    local links
+    links="$(mktemp "${TMPDIR:-/tmp}/vmm-links.XXXXXX")" || return 1
+    python3 - "$tb" "$links" <<'PYLINKS' || { rm -f "$links"; return 1; }
+import sys, tarfile
+archive, out = sys.argv[1:3]
+with tarfile.open(archive) as tf, open(out, 'w') as f:
+    for m in tf.getmembers():
+        if m.issym() or m.islnk():
+            f.write('%s\t%s\n' % (m.name, m.linkname or ''))
+PYLINKS
+    # tar does the bulk extraction; only the few symlinks need special care.
+    local -a args=(-xf "$tb" -C "$dest" "--strip-components=$strip")
+    while IFS=$'\t' read -r name target; do
+        [ -n "$name" ] && args+=("--exclude=$name")
+    done < "$links"
+    tar -v "${args[@]}" 2>&1 |
+        awk '{ n++; if (n % 1000 == 0) printf "\r  extracting %d entries", n > "/dev/stderr" }
+             END { if (n) printf "\n" > "/dev/stderr" }'
+    trc=${PIPESTATUS[0]}
+    [ "$trc" = 0 ] || { rm -f "$links"; return "$trc"; }
+    python3 - "$tb" "$dest" "$strip" "$links" <<'PYFALLBACK' || { rm -f "$links"; return 1; }
 import os, sys, tarfile
-archive, dest, strip = sys.argv[1], sys.argv[2], int(sys.argv[3])
+archive, dest, strip, linkfile = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 tf = tarfile.open(archive)
-members = tf.getmembers()
-tty = sys.stderr.isatty()
-for index, member in enumerate(members, 1):
-    if tty and (index % 200 == 0 or index == len(members)):
-        sys.stderr.write('\r  extracting %d/%d entries' % (index, len(members)))
-        sys.stderr.flush()
-    parts = member.name.split('/')
-    if len(parts) <= strip:
-        continue
-    name = '/'.join(parts[strip:]).lstrip('/')
-    if not name or '..' in name.split('/'):
-        continue
-    target = os.path.join(dest, name)
-    parent = os.path.dirname(target)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    if member.isdir():
-        os.makedirs(target, exist_ok=True)
-        continue
-    if member.isfile():
-        source = tf.extractfile(member)
-        with open(target, 'wb') as out:
-            out.write(source.read())
-    elif member.issym() or member.islnk():
-        # Resolve the link against the archive when possible: writing the
-        # target contents is more useful than a text file holding a path.
-        link = member.linkname or ''
-        if member.issym():
-            base = member.name.rsplit('/', 1)[0] if '/' in member.name else ''
-            resolved = os.path.normpath(os.path.join(base, link)) if base else link
+with open(linkfile) as f:
+    for line in f:
+        name, _, link = line.rstrip('\n').partition('\t')
+        parts = name.split('/')
+        if len(parts) <= strip:
+            continue
+        out = os.path.join(dest, *parts[strip:])
+        parent = os.path.dirname(out)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        resolved = link
+        if '/' in name:
+            resolved = os.path.normpath(os.path.join(name.rsplit('/', 1)[0], link))
+        source = None
+        try:
+            source = tf.getmember(resolved)
+        except KeyError:
+            try:
+                source = tf.getmember(link)
+            except KeyError:
+                pass
+        if source and source.isfile():
+            with open(out, 'wb') as dst:
+                dst.write(tf.extractfile(source).read())
         else:
-            resolved = link
-        parts = resolved.split('/')
-        source_member = tf.getmember(resolved) if len(parts) > strip and parts[:strip] == member.name.split('/')[:strip] else None
-        if source_member and source_member.isfile():
-            src = tf.extractfile(source_member)
-            with open(target, 'wb') as out:
-                out.write(src.read())
-        else:
-            with open(target, 'w') as out:
-                out.write(link + '\n')
-    else:
-        continue
-    try:
-        os.chmod(target, member.mode & 0o777)
-    except OSError:
-        pass
-if tty:
-    sys.stderr.write('\n')
+            with open(out, 'w') as dst:
+                dst.write((link or '') + '\n')
+        os.chmod(out, 0o644)
 PYFALLBACK
+    rm -f "$links"
 }

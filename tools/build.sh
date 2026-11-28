@@ -640,7 +640,7 @@ do_vm() {
 
     if [ -f "$build_dir/build.ninja" ]; then
         if ! meson setup --reconfigure "$build_dir" "$src" \
-                --prefix="$VMM_PREFIX" --buildtype=release >/dev/null; then
+                --prefix="$VMM_PREFIX" --buildtype=release; then
             note "stale virt-manager build dir; recreating"
             rm -rf "$build_dir"
         fi
@@ -696,7 +696,7 @@ do_ovmf() {
         done
         EXTRA_OPTFLAGS="${EXTRA_OPTFLAGS:-} -Wno-error ${VMM_CFLAGS}"
         export EXTRA_OPTFLAGS
-        make -C "$bt" clean >/dev/null 2>&1 || true
+        make -C "$bt" clean || true
         CFLAGS="$VMM_CFLAGS" CXXFLAGS="$VMM_CXXFLAGS" \
             make -C "$bt" -j "$jobs"
         : > "$stamp"
@@ -708,7 +708,7 @@ do_ovmf() {
     export PYTHON_COMMAND=python3
     set +u
     # shellcheck disable=SC1091
-    source ./edksetup.sh BaseTools >/dev/null
+    source ./edksetup.sh BaseTools
     set -u
     local tools_def="$src/Conf/tools_def.txt"
     if [ ! -f "$tools_def" ]; then
