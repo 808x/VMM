@@ -1675,7 +1675,7 @@ install_firmware() {
             note "installing built OVMF"
             mkdir -p "$prefix/firmware/OVMF"
             cp -a "$BUILD/ovmf/." "$prefix/firmware/OVMF/"
-            ln -sfn OVMF_CODE_4M.secboot.fd "$prefix/firmware/OVMF/OVMF_CODE_4M.ms.fd"
+            vmm_link_or_copy OVMF_CODE_4M.secboot.fd "$prefix/firmware/OVMF/OVMF_CODE_4M.ms.fd"
             ;;
         bundle)
             if [ -d "$DIR/share/firmware" ]; then
@@ -1688,8 +1688,8 @@ install_firmware() {
         link)
             note "linking OVMF from $ovmf_code and $ovmf_vars"
             mkdir -p "$prefix/firmware/OVMF"
-            ln -sfn "$ovmf_code" "$prefix/firmware/OVMF/OVMF_CODE_4M.fd"
-            ln -sfn "$ovmf_vars" "$prefix/firmware/OVMF/OVMF_VARS_4M.fd"
+            vmm_link_or_copy "$ovmf_code" "$prefix/firmware/OVMF/OVMF_CODE_4M.fd"
+            vmm_link_or_copy "$ovmf_vars" "$prefix/firmware/OVMF/OVMF_VARS_4M.fd"
             ;;
         skip|"") ;;
     esac
@@ -1867,7 +1867,7 @@ fi
 if [ "$qemu_bin" = link ]; then
     mkdir -p "$prefix/state"
     note "reusing $qemu_link; profile and virgl are not built"
-    ln -sfn "$qemu_link" "$prefix/state/qemu"
+    vmm_link_or_copy "$qemu_link" "$prefix/state/qemu"
 fi
 
 if [ "$qemu_bin" = compile ]; then

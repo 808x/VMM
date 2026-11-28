@@ -326,3 +326,23 @@ with open(linkfile) as f:
 PYFALLBACK
     rm -f "$links"
 }
+
+# Create a symlink, or copy the target when the filesystem refuses symlinks
+# (SMB2/NTFS mounts).  Relative targets are resolved against the link's dir.
+vmm_link_or_copy() {
+    local target="$1" link="$2" resolved dir
+    [ -L "$link" ] && rm -f "$link"
+    if ln -sfn -- "$target" "$link" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$link" 2>/dev/null || true
+    case "$target" in
+        /*) resolved="$target" ;;
+        *)  dir=${link%/*}; [ -n "$dir" ] || dir=.; resolved="$dir/$target" ;;
+    esac
+    if [ -d "$resolved" ]; then
+        cp -a "$resolved" "$link" || return 1
+    else
+        cp -f "$resolved" "$link" || return 1
+    fi
+}

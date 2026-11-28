@@ -737,7 +737,8 @@ do_ovmf() {
         -D SECURE_BOOT_ENABLE -D SMM_REQUIRE
 
     note "checks"
-    ln -sfn OVMF_CODE_4M.secboot.fd "$out/OVMF_CODE_4M.ms.fd"
+    vmm_link_or_copy OVMF_CODE_4M.secboot.fd "$out/OVMF_CODE_4M.ms.fd" ||
+        die "cannot create OVMF_CODE_4M.ms.fd"
     sha256sum "$out"/OVMF_CODE_4M.fd "$out"/OVMF_CODE_4M.secboot.fd \
         "$out"/OVMF_VARS_4M.fd "$out"/OVMF_VARS_4M.ms.fd
 
