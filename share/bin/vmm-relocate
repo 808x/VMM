@@ -1,19 +1,34 @@
 #!/bin/bash
-# Relocate prefix JSON assets after a manual move.  Idempotent.
+# Rewrite build-time prefix paths after a manual move.  Idempotent.
+# Usage: vmm-relocate [OLD_PREFIX]   (default: detected from build.cfg/wrappers)
 set -u
-PREFIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# Firmware descriptors: collapse baked paths to relative
-fwdir="$PREFIX/qemu/share/qemu/firmware"
-if [ -d "$fwdir" ]; then
-    sed -i -E 's#("(filename|template)": ").*/qemu/share/qemu/#\1../#' \
-        "$fwdir"/*.json 2>/dev/null || true
+NEW="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OLD="${1:-}"
+if [ -z "$OLD" ]; then
+    cfg="$NEW/share/virt-manager/virtinst/build.cfg"
+    [ -f "$cfg" ] && OLD=$(sed -n 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*//p' "$cfg" | head -1)
+    [ -n "$OLD" ] || OLD=$(grep -hoE '/[^"[:space:]]+/prefix' "$NEW/bin/virt-manager" 2>/dev/null | head -1)
 fi
+[ -n "$OLD" ] || { printf 'vmm-relocate: no old prefix found\n'; exit 0; }
+[ "$OLD" = "$NEW" ] && exit 0
 
-# vhost-user helpers: bare binary name (launcher puts libexec in PATH)
-vh="$PREFIX/qemu/share/qemu/vhost-user"
-if [ -d "$vh" ]; then
-    sed -i -E 's#("binary": ").*/#\1#' "$vh"/*.json 2>/dev/null || true
-fi
-
-exit 0
+python3 - "$NEW" "$OLD" <<'PY'
+import os, sys
+new, old = sys.argv[1].encode(), sys.argv[2].encode()
+changed = []
+for root, dirs, files in os.walk(new.decode()):
+    for name in files:
+        path = os.path.join(root, name)
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+        except OSError:
+            continue
+        if b'\0' in data or old not in data:
+            continue
+        with open(path, 'wb') as f:
+            f.write(data.replace(old, new))
+        changed.append(path)
+print('vmm-relocate: rewrote %d file(s) %s -> %s' %
+      (len(changed), old.decode(), new.decode()))
+PY

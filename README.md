@@ -79,7 +79,7 @@ Resolve everything without changing anything:
 ./install.sh --dry-run --qemu:bin=compile --virtmgr:bin=compile --ovmf:bin=compile
 ```
 
-Use `--prefix=DIR` to install somewhere other than `./prefix`.
+Use `--prefix=DIR` to install somewhere other than `./prefix`. If you move the prefix manually afterwards, run `bin/vmm-relocate` inside it to rewrite baked paths; running `vmm-define --sync` then updates the libvirt domains.
 
 ---
 
