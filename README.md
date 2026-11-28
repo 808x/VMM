@@ -6,20 +6,25 @@
 
 ## Screens
 
-<p align="center">
-  <img src="assets/screenshots/tui.png" width="420" alt="Installer TUI on the HOST page"> &nbsp;&nbsp; <img src="assets/screenshots/dynamic_profile.png" width="420" alt="profile.conf with dynamic memory and vCPU formulas"><br>
-  <b>Installer TUI</b>: six pages (QEMU, OVMF, virt-manager, HOST, AFTER, REVIEW). Missing build dependencies show a persistent error; sudo-gated rows ask once through sudo's own prompt. Runs in a PTY or a bare Linux TTY (e.g. <code>Ctrl+Alt+F3</code>).<br>
-  <b>Dynamic profile</b>: memory ceiling, boot allocation, vCPU count and venus hostmem are computed from the host. Blank fields are filled back from the live domain on sync.<br><br>
-
-  <img src="assets/screenshots/menu_pcie.png" width="420" alt="PCIe hotplug submenu"> &nbsp;&nbsp; <img src="assets/screenshots/menu_usb.png" width="420" alt="USB hotplug submenu"><br>
-  <b>PCIe hotplug</b>: a curated submenu that hides boot displays and mounted filesystems; here only the RTX A2000 is pre-selected.<br>
-  <b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection.<br>
-  <em><b>Note:</b> the top bar is the Debian host's XFCE global-menu applet showing virt-manager's menus (File, Virtual Machine, View, Send Key). The window is maximized with its titlebar hidden by XFCE</em><br><br>
-</p>
-
-<p align="center"><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b> — virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</p>
-
-<p align="center"><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows 11 desktop and Task Manager"><br><b>Windows 11</b> — VMware SVGA 3D with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. Portabilized app collection from <a href="https://github.com/808x/portable-apps">808x/portable-apps</a> in context menu.</p>
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/tui.png" width="100%" alt="Installer TUI on the HOST page"><br><b>Installer TUI</b>: six pages (QEMU, OVMF, virt-manager, HOST, AFTER, REVIEW). Missing build dependencies show a persistent error; sudo-gated rows ask once through sudo's own prompt. Runs in a PTY or a bare Linux TTY (e.g. <code>Ctrl+Alt+F3</code>).</td>
+    <td width="50%"><img src="assets/screenshots/dynamic_profile.png" width="100%" alt="profile.conf with dynamic memory and vCPU formulas"><br><b>Dynamic profile</b>: memory ceiling, boot allocation, vCPU count and venus hostmem are computed from the host. Blank fields are filled back from the live domain on sync.</td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/menu_pcie.png" width="100%" alt="PCIe hotplug submenu"><br><b>PCIe hotplug</b>: a curated submenu that hides boot displays and mounted filesystems; here only the RTX A2000 is pre-selected.</td>
+    <td><img src="assets/screenshots/menu_usb.png" width="100%" alt="USB hotplug submenu"><br><b>USB hotplug</b>: a submenu backed by a device cache; Bluetooth, webcam and Goodix devices are listed for redirection for live attachment to the guest.</td>
+  </tr>
+  <tr>
+    <td colspan="2"><em><b>Note:</b> the top bar is the Debian host's XFCE global-menu applet showing virt-manager's menus (File, Virtual Machine, View, Send Key). The window is maximized with its titlebar hidden by XFCE</em></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="assets/screenshots/vm_cachyos.png" width="100%" alt="CachyOS desktop"><br><b>CachyOS</b> — virtio-vga-gl with venus/blob globals, dynamic hostmem and a GL console reparented into the detail window.</td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="assets/screenshots/vm_windows.png" width="100%" alt="Windows 11 desktop and Task Manager"><br><b>Windows 11</b> — VMware SVGA 3D with DXVK, host-driven resolution and SPICE channels kept for USB and the agent. Portabilized app collection from <a href="https://github.com/808x/portable-apps">808x/portable-apps</a> in context menu.</td>
+  </tr>
+</table>
 
 ---
 
