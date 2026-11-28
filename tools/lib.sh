@@ -268,7 +268,12 @@ vmm_extract_tar() {
 import os, sys, tarfile
 archive, dest, strip = sys.argv[1], sys.argv[2], int(sys.argv[3])
 tf = tarfile.open(archive)
-for member in tf:
+members = tf.getmembers()
+tty = sys.stderr.isatty()
+for index, member in enumerate(members, 1):
+    if tty and (index % 200 == 0 or index == len(members)):
+        sys.stderr.write('\r  extracting %d/%d entries' % (index, len(members)))
+        sys.stderr.flush()
     parts = member.name.split('/')
     if len(parts) <= strip:
         continue
@@ -310,5 +315,7 @@ for member in tf:
         os.chmod(target, member.mode & 0o777)
     except OSError:
         pass
+if tty:
+    sys.stderr.write('\n')
 PYFALLBACK
 }

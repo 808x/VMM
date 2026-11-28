@@ -1577,6 +1577,7 @@ fetch_source() {
     rm -rf "$dir" "$BUILD/$builddir"
     fetch "$url" "$tb"
     mkdir -p "$dir"
+    note "extracting $name $ref from $(basename "$tb")"
     vmm_extract_tar "$tb" "$dir" 1
     mark_source "$dir" "$ref"
     note "$name $ref extracted"
