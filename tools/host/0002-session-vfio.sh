@@ -11,8 +11,10 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/../lib.sh"
 
 root=$(vmm_root)
-helper="$root/share/bin/vmm-vfio-ctl"
-[ -f "$helper" ] || die "share/bin/vmm-vfio-ctl is not present"
+prefix=$(vmm_prefix)
+helper="$prefix/libexec/vmm-vfio-ctl"
+[ -f "$helper" ] || helper="$root/share/bin/vmm-vfio-ctl"
+[ -f "$helper" ] || die "vmm-vfio-ctl is not present in prefix or source tree"
 
 note "installing vfio helper (host-global, opt-in)"
 install -d /usr/local/sbin

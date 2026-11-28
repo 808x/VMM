@@ -8,8 +8,12 @@ usage() {
 }
 [ $# = 2 ] || usage
 cmd=$1
-bdf=${2#0000:}
-bdf=${bdf,,}
+raw=${2,,}
+colons=${raw//[^:]/}
+case ${#colons} in
+    1) bdf="0000:$raw" ;;      # bus:slot.func -> sysfs needs the domain
+    *) bdf="$raw" ;;
+esac
 dev=/sys/bus/pci/devices/$bdf
 [ -e "$dev" ] || { echo "vmm-vfio-ctl: no device $bdf" >&2; exit 1; }
 
