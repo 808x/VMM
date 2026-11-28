@@ -243,3 +243,72 @@ vmm_logwin_stream() (
     done
     cleanup
 )
+
+# Extract a tarball, falling back to plain files when the filesystem cannot
+# create symlinks (NTFS/SMB mounts).  The fallback writes symlink targets as
+# text files and preserves regular-file modes.
+#   vmm_extract_tar ARCHIVE DEST [STRIP_COMPONENTS]
+vmm_extract_tar() {
+    local tb="$1" dest="$2" strip="${3:-0}" err
+    err="$(mktemp "${TMPDIR:-/tmp}/vmm-tar.XXXXXX")" || return 1
+    if [ "${VMM_FORCE_TAR_FALLBACK:-0}" != 1 ] &&
+       tar -xf "$tb" -C "$dest" --strip-components="$strip" 2>"$err"; then
+        rm -f "$err"
+        return 0
+    fi
+    if [ "${VMM_FORCE_TAR_FALLBACK:-0}" != 1 ] &&
+       ! grep -qiE 'symlink|operation not supported|not supported' "$err"; then
+        cat "$err" >&2
+        rm -f "$err"
+        return 1
+    fi
+    rm -f "$err"
+    printf -- '-- tar: symlinks unsupported; extracting with plain-file fallback\n' >&2
+    python3 - "$tb" "$dest" "$strip" <<'PYFALLBACK'
+import os, sys, tarfile
+archive, dest, strip = sys.argv[1], sys.argv[2], int(sys.argv[3])
+tf = tarfile.open(archive)
+for member in tf:
+    parts = member.name.split('/')
+    if len(parts) <= strip:
+        continue
+    name = '/'.join(parts[strip:]).lstrip('/')
+    if not name or '..' in name.split('/'):
+        continue
+    target = os.path.join(dest, name)
+    parent = os.path.dirname(target)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if member.isdir():
+        os.makedirs(target, exist_ok=True)
+        continue
+    if member.isfile():
+        source = tf.extractfile(member)
+        with open(target, 'wb') as out:
+            out.write(source.read())
+    elif member.issym() or member.islnk():
+        # Resolve the link against the archive when possible: writing the
+        # target contents is more useful than a text file holding a path.
+        link = member.linkname or ''
+        if member.issym():
+            base = member.name.rsplit('/', 1)[0] if '/' in member.name else ''
+            resolved = os.path.normpath(os.path.join(base, link)) if base else link
+        else:
+            resolved = link
+        parts = resolved.split('/')
+        source_member = tf.getmember(resolved) if len(parts) > strip and parts[:strip] == member.name.split('/')[:strip] else None
+        if source_member and source_member.isfile():
+            src = tf.extractfile(source_member)
+            with open(target, 'wb') as out:
+                out.write(src.read())
+        else:
+            with open(target, 'w') as out:
+                out.write(link + '\n')
+    else:
+        continue
+    try:
+        os.chmod(target, member.mode & 0o777)
+    except OSError:
+        pass
+PYFALLBACK
+}

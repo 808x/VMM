@@ -605,7 +605,7 @@ do_qemu() {
     # libraries here (local GCC build vs the vendored prebuilt one).
     rm -rf "$stage"
     mkdir -p "$stage"
-    tar -xzf "$dxvk" -C "$stage"
+    vmm_extract_tar "$dxvk" "$stage" 0
     note "runtime libs"
     mkdir -p "$VMM_PREFIX/lib" "$VMM_PREFIX/libexec"
     cp -a "$vprefix"/lib/x86_64-linux-gnu/libvirglrenderer.so* "$VMM_PREFIX/lib/"
