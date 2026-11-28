@@ -654,14 +654,10 @@ do_vm() {
             die "meson setup failed"
     fi
 
-    local log="$build_dir/build.log"
-    mkdir -p "$(dirname "$log")"
     CFLAGS="${VMM_CFLAGS:-}" CXXFLAGS="${VMM_CXXFLAGS:-}" \
-        ninja -C "$build_dir" -j "$jobs" 2>&1 | tee "$log" ||
-        die "ninja build failed"
+        ninja -C "$build_dir" -j "$jobs" || die "ninja build failed"
     CFLAGS="${VMM_CFLAGS:-}" CXXFLAGS="${VMM_CXXFLAGS:-}" \
-        ninja -C "$build_dir" install 2>&1 | tee -a "$log" ||
-        die "ninja install failed"
+        ninja -C "$build_dir" install || die "ninja install failed"
 
     patch_install_extra virt-manager "$patches"
     note "virt-manager installed to $VMM_PREFIX"
