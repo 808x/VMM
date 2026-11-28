@@ -321,12 +321,12 @@ source_checkout() {
 
 patch_already_applied() {
     local tree="$1" file="$2"
-    if git -C "$tree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        ( cd "$tree" && git apply --reverse --check "$file" ) >/dev/null 2>&1
-    else
-        ( cd "$tree" && git apply --reverse --check "$file" ) >/dev/null 2>&1 ||
-            patch -p1 -R --dry-run --forward < "$file" >/dev/null 2>&1
-    fi
+    # Both checks must run with the patched tree as cwd.  git apply cannot
+    # read the context-style hunks used by several of our patches, so the
+    # patch(1) reverse dry-run is the authoritative check for those.
+    ( cd "$tree" && git apply --reverse --check "$file" ) >/dev/null 2>&1 && return 0
+    ( cd "$tree" && sed '/^--- a\//,$!d' "$file" |
+        patch -p1 -R --dry-run --forward ) >/dev/null 2>&1
 }
 
 patch_apply_file() {
