@@ -1760,9 +1760,10 @@ ensure_front_links() {
     local rel="$prefix/launch.sh" dst="$ROOT/launch.sh"
     [ "$ROOT" = "$DIR" ] && return 0
     [ -x "$rel" ] || return 0
-    rm -f "$dst" 2>/dev/null || true
-    ln -s "$rel" "$dst" 2>/dev/null && return 0
-    cp -f "$DIR/$rel" "$dst" 2>/dev/null && chmod 0755 "$dst" && return 0
+    if vmm_link_or_copy "$rel" "$dst"; then
+        chmod 0755 "$dst" 2>/dev/null || true
+        return 0
+    fi
     warn "cannot link or copy $dst"
 }
 
