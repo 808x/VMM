@@ -118,7 +118,7 @@ The template pair (`share/examples/*.xml.in`) contains no guest-side addresses a
 ./install.sh --ovmf:patch=nomessage,nosplash
 ./install.sh --virtmgr:bin=compile|skip|link:/usr/bin/virt-manager
 ./install.sh --virtmgr:patch=pci-menu,reparent,usb-cache,usb-menu
-./install.sh --tool=deps,session-vfio,write-xml,libvirt-access,verify,desktop-item,clean-sources
+./install.sh --tool=deps,session-vfio,write-xml,libvirt-access,iommu-report,verify,desktop-item,clean-sources
 ./install.sh --list-patches
 ./install.sh --dry-run
 ./install.sh --update                 # resolve new upstream locks
@@ -163,6 +163,7 @@ Patch names are the flag names from `--list-patches`. An empty `--*:patch=` mean
 | host | `session-vfio` | Install the opt-in root helper, udev rule and sudoers entry for session-mode VFIO. |
 | host | `write-xml` | Render the example domains into the prefix. |
 | host | `libvirt-access` | AppArmor rules, prefix ownership and parent traversal for libvirtd. |
+| host | `iommu-report` | Dump IOMMU groups, drivers and VFIO readiness into `prefix/state/iommu-report.txt`, ready to paste into a VFIO thread. |
 | after | `verify` | Check launcher, QEMU and firmware paths. |
 | after | `desktop-item` | Write `vmm.desktop` so the app appears in the desktop menu. |
 | after | `clean-sources` | Delete the source cache and build outputs. |
