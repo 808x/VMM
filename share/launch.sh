@@ -56,6 +56,12 @@ if [ ! -x "$PREFIX/bin/virt-manager" ]; then
     exit 1
 fi
 
+# Keep virt-manager's log/cache inside the prefix, owned by the user running
+# this launcher.  Avoids stale root-owned ~/.cache/virt-manager from sudo runs.
+export XDG_CACHE_HOME="${VMM_CACHE_DIR:-$PREFIX/cache}"
+mkdir -p "$XDG_CACHE_HOME" 2>/dev/null ||
+    echo "launch: cannot create cache dir $XDG_CACHE_HOME" >&2
+
 export GSETTINGS_SCHEMA_DIR="$PREFIX/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
 export PYTHONPATH="$PREFIX/share/virt-manager${PYTHONPATH:+:$PYTHONPATH}"
 export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
