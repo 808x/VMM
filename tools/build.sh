@@ -742,13 +742,7 @@ do_ovmf() {
     sha256sum "$out"/OVMF_CODE_4M.fd "$out"/OVMF_CODE_4M.secboot.fd \
         "$out"/OVMF_VARS_4M.fd "$out"/OVMF_VARS_4M.ms.fd
 
-    cat <<EOF
--- images in $out
-   Install by copying them to share/firmware/OVMF and rerunning install.sh,
-   or pass OUT_DIR=share/firmware/OVMF explicitly.
-   Expected silence: a normal boot stays black; with no bootable device the
-   firmware still prints "No bootable option or device was found."
-EOF
+    note "OVMF images in $out"
 }
 
 build_engine() {

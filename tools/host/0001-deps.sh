@@ -63,6 +63,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("LibvirtGLib", "1.0")
 PY
+    python3 -c 'import yaml' 2>/dev/null || pkg_missing+=("python:yaml")
 }
 
 vm_deps_check() {
@@ -158,7 +159,7 @@ install_build_deps() {
             pkgs="base-devel git curl meson ninja pkgconf python gobject-introspection
                   gtk3 spice-protocol spice spice-gtk libusb libpciaccess libdrm libepoxy
                   mesa vulkan-icd-loader vulkan-headers libx11 libxkbcommon gettext
-                  libxml2 python-gobject python-cairo libvirt libvirt-glib python-docutils
+                  libxml2 python-gobject python-cairo python-yaml libvirt libvirt-glib python-docutils
                   gtksourceview4 vte3 nasm acpica sdl3 sdl2 glfw glslang"
             as_root pacman -S --needed --noconfirm $pkgs
             ;;
@@ -167,7 +168,7 @@ install_build_deps() {
                   libglib2.0-dev libgtk-3-dev libspice-protocol-dev libspice-server-dev
                   libusb-1.0-0-dev libpciaccess-dev libdrm-dev libepoxy-dev libgbm-dev
                   libvulkan-dev libx11-dev libxkbcommon-dev gettext libxml2-dev
-                  python3-gi python3-cairo gir1.2-gtk-3.0 gir1.2-libvirt-glib-1.0
+                  python3-gi python3-cairo python3-yaml gir1.2-gtk-3.0 gir1.2-libvirt-glib-1.0
                   gir1.2-spiceclientgtk-3.0 libvirt-daemon-system libvirt-clients
                   gir1.2-gtksource-4 gir1.2-vte-2.91 python3-docutils nasm acpica-tools
                   libsdl3-dev libsdl2-dev libglfw3-dev glslang-tools"
@@ -178,7 +179,7 @@ install_build_deps() {
                   gtk3-devel spice-protocol-devel spice-server-devel libusb1-devel
                   libpciaccess-devel libdrm-devel libepoxy-devel mesa-libgbm-devel
                   vulkan-loader-devel libX11-devel libxkbcommon-devel gettext
-                  libxml2-devel python3-gobject python3-cairo libvirt-devel
+                  libxml2-devel python3-gobject python3-cairo python3-pyyaml libvirt-devel
                   libvirt-glib-devel gtksourceview4 python3-docutils nasm acpica-tools
                   SDL3-devel SDL2-devel glfw-devel glslang"
             as_root dnf install -y $pkgs
